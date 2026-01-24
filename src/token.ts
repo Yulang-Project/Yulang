@@ -10,6 +10,10 @@ export enum TokenType {
     FUN = 'FUN',
     EXPORT = 'EXPORT',
     INT = 'INT',
+    I32 = 'I32',
+    I64 = 'I64',
+    F32 = 'F32',
+    F64 = 'F64',
     BOOL = 'BOOL',
     CHAR = 'CHAR',
     FLOAT = 'FLOAT',
@@ -40,7 +44,7 @@ export enum TokenType {
     PRIVATE = 'PRIVATE',
     ARRAY = 'ARRAY', // NEW: Add ARRAY token
     OBJECT = 'OBJECT', // NEW: Add OBJECT token
-
+    POINTER = 'POINTER', // NEW: Add POINTER token
     // Identifiers
     IDENTIFIER = 'IDENTIFIER',
 
@@ -62,6 +66,7 @@ export enum TokenType {
     GT_EQ = 'GT_EQ', // >=
     EQ = 'EQ', // =
     BANG = 'BANG', // !
+    AMPERSAND = 'AMPERSAND', // &
     AMP_AMP = 'AMP_AMP', // &&
     PIPE = 'PIPE', // | (NEW)
     PIPE_PIPE = 'PIPE_PIPE', // ||
@@ -115,11 +120,13 @@ Object.assign(keywords, {
     'LoadDLL': TokenType.LOADDLL,
     'fun': TokenType.FUN,
     'export': TokenType.EXPORT,
-    'int': TokenType.INT,
+    // Preferred primitive type keywords
+    'i32': TokenType.I32,
+    'i64': TokenType.I64,
+    'f32': TokenType.F32,
+    'f64': TokenType.F64,
     'bool': TokenType.BOOL,
     'char': TokenType.CHAR,
-    'float': TokenType.FLOAT,
-    'double': TokenType.DOUBLE,
     'string': TokenType.STRING,
 
     'bind': TokenType.BIND,
@@ -147,4 +154,5 @@ Object.assign(keywords, {
     'private': TokenType.PRIVATE,
     'array': TokenType.ARRAY,
     'object': TokenType.OBJECT, // NEW
-});
+    'pointer': TokenType.POINTER,
+})

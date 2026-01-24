@@ -225,7 +225,7 @@ export class Lexer {
                 if (this.match('&')) {
                     this.addToken(TokenType.AMP_AMP);
                 } else {
-                    this.addToken(TokenType.UNKNOWN, "Unexpected character: &");
+                    this.addToken(TokenType.AMPERSAND);
                 }
                 break;
             case '|':

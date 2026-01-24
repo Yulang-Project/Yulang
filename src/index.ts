@@ -17,7 +17,6 @@ cli
   .option('--output <path>', 'Output file path', { default: './a.out' })
   .option('--debug', 'Enable debug output (tokens, AST, IR)', { default: false })
   .option('--target <type>', 'Compilation target type: exec (executable), static-lib (static library), declare-file (declaration file), or asm (assembly file)', { default: 'exec' })
-  .option('--no-std-lib', 'Do not link the standard library automatically', { default: false })
   .action(async (filePath, options) => {
     const inputFilePath = path.resolve(filePath);
     const outputFilePath = path.resolve(options.output);
@@ -126,7 +125,7 @@ cli
         // 3. IR Generation (only for exec or static-lib)
 
         const mangleStdLib = (options.target === 'exec'); // Mangle for exec, not for static-lib
-        const irGenerator = new IRGenerator(parser, mangleStdLib, inputFilePath); const llvmIr = irGenerator.generate(statements);
+        const irGenerator = new IRGenerator(parser, mangleStdLib, inputFilePath, options.debug); const llvmIr = irGenerator.generate(statements);
         if (options.debug) {
           console.log("\n--- LLVM IR ---");
           console.log(llvmIr);

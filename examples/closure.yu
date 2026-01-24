@@ -1,0 +1,76 @@
+#import "std/io" as io;
+
+fun main(): i64 {
+    io.print("--- Pointer/Reference Test ---\n");
+    let x: i64 = 42;
+    let p: pointer(i64) = &x;
+    io.print("Value of x: ");
+    io.println_i64(x);
+    io.print("Value via pointer p: ");
+    io.println_i64(*p);
+
+    *p = 100;
+    io.print("New value of x after *p = 100: ");
+    io.println_i64(x);
+
+    let p2 -> x;
+    *p2 = 200;
+    io.print("New value of x after *p2 = 200: ");
+    io.println_i64(x);
+
+    io.print("\n--- Implicit Referencing Test ---\n");
+    modify_value(x);
+    io.print("Value of x after implicit reference passing: ");
+    io.println_i64(x);
+
+
+    io.print("\n--- Higher-Order Function Test ---\n");
+    let f: fun(i64)(i64) = get_adder(10);
+    let result = f(5);
+    io.print("Result of returned function (10 + 5): ");
+    io.println_i64(result);
+    
+    run_and_print(f, 20);
+
+    io.print("\n--- Closure Test ---\n");
+    let counter_a = make_counter();
+    let counter_b = make_counter();
+
+    io.println_i64(counter_a()); // 1
+    io.println_i64(counter_a()); // 2
+    io.println_i64(counter_b()); // 1
+    io.println_i64(counter_a()); // 3
+    
+    return 0;
+}
+
+// Function that expects a pointer
+fun modify_value(val_ptr: pointer(i64)) {
+    *val_ptr = 300;
+}
+
+// Function that returns a function (closure)
+fun get_adder(amount: i64): fun(i64)(i64) {
+    let captured_amount = amount;
+    fun adder(y: i64): i64 {
+        return captured_amount + y;
+    }
+    return adder;
+}
+
+// Function that accepts a function as an argument
+fun run_and_print(op: fun(i64)(i64), val: i64) {
+    let res = op(val);
+    io.print("Result of passed function (10 + 20): ");
+    io.println_i64(res);
+}
+
+// Function that returns a closure with state
+fun make_counter(): fun()(i64) {
+    let count = 0;
+    fun counter(): i64 {
+        count = count + 1;
+        return count;
+    }
+    return counter;
+}

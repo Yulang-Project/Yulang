@@ -16,3 +16,4 @@ temp/
 *.tsbuildinfo
 yarn.lock
 *.out
+test/

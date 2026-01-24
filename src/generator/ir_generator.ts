@@ -2,9 +2,9 @@
 
 import {
     ASTNode, type ExprVisitor, type StmtVisitor,
-    Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr,
+    Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, AddressOfExpr, DereferenceExpr, FunctionLiteralExpr,
     Stmt, ExpressionStmt, BlockStmt, LetStmt, ConstStmt, IfStmt, WhileStmt, ReturnStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, ImportStmt, DeclareFunction,
-    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, UsingStmt
+    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, UsingStmt, PointerTypeAnnotation, FunctionTypeAnnotation
 } from '../ast.js';
 import { Token, TokenType } from '../token.js';
 import { LLVMIRHelper } from './llvm_ir_helpers.js';
@@ -15,18 +15,19 @@ import { BuiltinFunctions } from './builtins.js';
 import { LangItems } from './lang_items.js';
 import { findPredefinedFunction } from '../predefine/funs.js';
 
-export type IRValue = { value: string, type: string, classInstancePtr?: string, classInstancePtrType?: string, ptr?: string };
+export type IRValue = { value: string, type: string, classInstancePtr?: string, classInstancePtrType?: string, ptr?: string, ptrType?: string, address?: string };
 
 type SymbolEntry = {
-    llvmType: string; // The LLVM type of the variable (e.g., i32, i8*, %struct.MyClass*)
-    ptr: string;      // The LLVM IR name of the pointer to where the variable's value is stored (e.g., %var_ptr)
-    isPointer: boolean; // True if this Yulang variable is itself a pointer type (e.g., `let p: pointer(char)`)
+    llvmType: string; // 变量的 LLVM 类型 (例如, i32, i8*, %struct.MyClass*)
+    ptr: string;      // LLVM IR 中指向变量值存储位置的指针名称 (例如, %var_ptr)
+    isPointer: boolean; // 如果这个 Yulang 变量本身是一个指针类型 (例如, `let p: pointer(char)`)，则为 true
+    definedInScopeDepth: number; // 变量定义的深度，用于闭包捕获分析
 };
 
 // Represents a single scope (e.g., a function body, an if-block)
 class Scope {
     private symbols: Map<string, SymbolEntry> = new Map();
-    constructor(public parent: Scope | null = null) {}
+    constructor(public parent: Scope | null = null, public depth: number = 0) {}
 
     define(name: string, entry: SymbolEntry): boolean {
         if (this.symbols.has(name)) {
@@ -39,6 +40,109 @@ class Scope {
     find(name: string): SymbolEntry | null {
         return this.symbols.get(name) || this.parent?.find(name) || null;
     }
+}
+
+class CapturedVariableInfo {
+    constructor(
+        public name: string,
+        public llvmType: string, // 变量本身的类型 (例如, i32, %struct.MyStruct, i32*)
+        public ptr: string,      // 指向该变量存储位置的 alloca/global ptr
+        public definedInScopeDepth: number
+    ) {}
+}
+
+// 辅助访问者，用于在函数体中查找捕获的变量
+class ClosureAnalyzer implements ExprVisitor<void>, StmtVisitor<void> {
+    private captured: Map<string, CapturedVariableInfo> = new Map();
+    private outerScopeAtLiteralDefinition: Scope; // 闭包字面量定义时的外部作用域
+    private functionBodyScopeDepth: number; // 闭包函数体将创建的作用域的深度
+
+    constructor(outerScopeAtLiteralDefinition: Scope, functionBodyScopeDepth: number) {
+        this.outerScopeAtLiteralDefinition = outerScopeAtLiteralDefinition;
+        this.functionBodyScopeDepth = functionBodyScopeDepth;
+    }
+
+    getCapturedVariables(): CapturedVariableInfo[] {
+        return Array.from(this.captured.values());
+    }
+
+    private resolveIdentifierAndCaptureIfNecessary(name: string) {
+        // 从闭包字面量定义时的外部作用域开始向上查找
+        let currentSearchScope: Scope | null = this.outerScopeAtLiteralDefinition;
+        while (currentSearchScope) {
+            const entry = currentSearchScope.find(name); // 使用公共的 find 方法
+            if (entry) {
+                // 找到了一个符号。判断它是否需要被捕获。
+                // 如果它在外部作用域定义 (definedInScopeDepth < 闭包函数体作用域深度)
+                // 并且它不是全局变量 (definedInScopeDepth > 0)
+                if (entry.definedInScopeDepth < this.functionBodyScopeDepth &&
+                    entry.definedInScopeDepth > 0) { 
+                    
+                    if (!this.captured.has(name)) {
+                        this.captured.set(name, new CapturedVariableInfo(
+                            name,
+                            entry.llvmType,
+                            entry.ptr,
+                            entry.definedInScopeDepth
+                        ));
+                    }
+                }
+                return; // 找到了（无论是局部、全局还是捕获的），停止搜索
+            }
+            currentSearchScope = currentSearchScope.parent;
+        }
+        // 如果在任何作用域中都未找到，则它是一个未声明的标识符。
+        // 此访问者仅识别 *捕获的* 变量，不处理一般的语义错误。
+        // 语义分析阶段会处理未声明的变量。
+    }
+
+    // --- ExprVisitor ---
+    visitLiteralExpr(expr: LiteralExpr): void {}
+    visitBinaryExpr(expr: BinaryExpr): void { expr.left.accept(this); expr.right.accept(this); }
+    visitUnaryExpr(expr: UnaryExpr): void { expr.right.accept(this); }
+    visitAddressOfExpr(expr: AddressOfExpr): void { expr.expression.accept(this); }
+    visitDereferenceExpr(expr: DereferenceExpr): void { expr.expression.accept(this); }
+    visitGroupingExpr(expr: GroupingExpr): void { expr.expression.accept(this); }
+    visitCallExpr(expr: CallExpr): void { expr.callee.accept(this); expr.args.forEach(arg => arg.accept(this)); }
+    visitGetExpr(expr: GetExpr): void { expr.object.accept(this); }
+    visitAssignExpr(expr: AssignExpr): void { expr.target.accept(this); expr.value.accept(this); }
+    visitThisExpr(expr: ThisExpr): void { /* 'this' 通常作为隐式参数处理，不作为捕获变量 */ }
+    visitAsExpr(expr: AsExpr): void { expr.expression.accept(this); }
+    visitObjectLiteralExpr(expr: ObjectLiteralExpr): void { expr.properties.forEach(v => v.accept(this)); }
+    visitNewExpr(expr: NewExpr): void { expr.callee.accept(this); expr.args.forEach(arg => arg.accept(this)); }
+    visitDeleteExpr(expr: DeleteExpr): void { expr.target.accept(this); }
+    visitFunctionLiteralExpr(expr: FunctionLiteralExpr): void { /* 嵌套的函数字面量主体由其自身的 ClosureAnalyzer 处理，此处不深入 */ }
+
+    visitIdentifierExpr(expr: IdentifierExpr): void {
+        this.resolveIdentifierAndCaptureIfNecessary(expr.name.lexeme);
+    }
+
+    // --- StmtVisitor ---
+    visitExpressionStmt(stmt: ExpressionStmt): void { stmt.expression.accept(this); }
+    visitBlockStmt(stmt: BlockStmt): void { stmt.statements.forEach(s => s.accept(this)); }
+    visitLetStmt(stmt: LetStmt): void { // 变量声明的初始化器可能引用外部变量
+        if (stmt.initializer) stmt.initializer.accept(this);
+        // 此处的 LetStmt 定义了局部变量，这些局部变量不会被外部捕获，
+        // 但它们的值可能依赖于外部变量，因此需要解析初始化器。
+    }
+    visitConstStmt(stmt: ConstStmt): void { // 同 LetStmt
+        if (stmt.initializer) stmt.initializer.accept(this);
+    }
+    visitIfStmt(stmt: IfStmt): void {
+        stmt.condition.accept(this);
+        stmt.thenBranch.accept(this);
+        if (stmt.elseBranch) stmt.elseBranch.accept(this);
+    }
+    visitWhileStmt(stmt: WhileStmt): void { stmt.condition.accept(this); stmt.body.accept(this); }
+    visitReturnStmt(stmt: ReturnStmt): void { if (stmt.value) stmt.value.accept(this); }
+    // 其他语句通过其表达式或不包含可捕获的标识符
+    visitFunctionDeclaration(decl: FunctionDeclaration): void {} // 此分析器用于字面量，而非声明
+    visitClassDeclaration(decl: ClassDeclaration): void {}
+    visitStructDeclaration(decl: StructDeclaration): void {}
+    visitPropertyDeclaration(stmt: PropertyDeclaration): void { if (stmt.initializer) stmt.initializer.accept(this); }
+    visitImportStmt(stmt: ImportStmt): void {}
+    visitDeclareFunction(decl: DeclareFunction): void {}
+    visitUsingStmt(stmt: UsingStmt): void {}
 }
 
 
@@ -65,7 +169,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     public llvmHelper: LLVMIRHelper = new LLVMIRHelper();
     public builtins: BuiltinFunctions;
 
-    private globalScope: Scope = new Scope();
+    private globalScope: Scope = new Scope(null, 0);
     public currentScope: Scope = this.globalScope;
     private currentFunction: FunctionDeclaration | null = null;
     private labelCounter = 0;
@@ -77,16 +181,55 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private parser: Parser;
     private mangleStdLib: boolean;
     private sourceFilePath: string; // New field
+    private debug: boolean; // NEW: Debug flag
+    private pass: 'declaration' | 'definition' = 'declaration'; // NEW: Compiler pass flag
     private objectLiteralCounter: number = 0;
     private heapGlobalsEmitted: boolean = false;
     private lowLevelRuntimeEmitted: boolean = false;
     private moduleObjects: Map<string, { structName: string, globalName: string, members: Map<string, ModuleMember>, initialized: boolean }> = new Map();
+    private hoistedDefinitions: string[] = []; // Type/const definitions emitted inside functions that must live at module scope
+    private hoistedFunctions: string[][] = []; // Full function definitions emitted while inside another function
 
-    constructor(parser: Parser, mangleStdLib: boolean = true, sourceFilePath: string = '') { // Accept sourceFilePath parameter
+    // Splits a LLVM struct type string "{ T1, T2, ... }" into its top-level fields safely (ignoring nested commas).
+    private splitStructFields(structType: string): string[] {
+        const trimmed = structType.trim();
+        const withoutBraces = (trimmed.startsWith('{') && trimmed.endsWith('}'))
+            ? trimmed.slice(1, -1)
+            : trimmed;
+        const fields: string[] = [];
+        let current = '';
+        let depth = 0;
+        for (const ch of withoutBraces) {
+            if (ch === ',' && depth === 0) {
+                if (current.trim().length > 0) fields.push(current.trim());
+                current = '';
+                continue;
+            }
+            if (ch === '(' || ch === '{' || ch === '[') depth++;
+            if (ch === ')' || ch === '}' || ch === ']') depth = Math.max(0, depth - 1);
+            current += ch;
+        }
+        if (current.trim().length > 0) fields.push(current.trim());
+        return fields;
+    }
+
+    private emitHoisted(def: string) {
+        if (!this.hoistedDefinitions.includes(def)) {
+            this.hoistedDefinitions.push(def);
+        }
+    }
+
+    private hoistFunctionDefinition(lines: string[]) {
+        if (lines.length > 0) this.hoistedFunctions.push(lines);
+    }
+
+    constructor(parser: Parser, mangleStdLib: boolean = true, sourceFilePath: string = '', debug: boolean = false) { // Accept sourceFilePath parameter
         this.parser = parser;
         this.mangleStdLib = mangleStdLib;
         this.sourceFilePath = sourceFilePath; // Initialize new field
+        this.debug = debug; // Initialize new debug flag
         this.builtins = new BuiltinFunctions(this.llvmHelper);
+        this.llvmHelper.setGenerator(this); // Set back-reference for helpers
         this.emit(`target triple = "${this.llvmHelper.getTargetTriple()}"`, false);
         this.emit(`target datalayout = "${this.llvmHelper.getDataLayout()}"`, false);
         this.emitLangItemStructs();
@@ -103,11 +246,29 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     public generate(nodes: ASTNode[]): string {
         this.emitGlobalDefinitions(nodes);
 
+        if (this.debug) console.log("Starting IR generation, global scope depth:", this.globalScope.depth);
+
         nodes.forEach(node => {
-            if (node instanceof FunctionDeclaration || node instanceof LetStmt || node instanceof ConstStmt || node instanceof ImportStmt || node instanceof DeclareFunction) {
+            if (node instanceof FunctionDeclaration) {
+                if (this.debug) console.log("Processing top-level FunctionDeclaration:", node.name.lexeme);
+                (node as Stmt).accept(this);
+            } else if (node instanceof LetStmt || node instanceof ConstStmt || node instanceof ImportStmt || node instanceof DeclareFunction) {
                 (node as Stmt).accept(this);
             }
         });
+
+        // Insert hoisted definitions (e.g., closure env structs or nested functions) before the first function definition
+        if (this.hoistedDefinitions.length > 0 || this.hoistedFunctions.length > 0) {
+            const insertionIndex = this.builder.findIndex(line => line.trim().startsWith('define '));
+            const insertAt = insertionIndex >= 0 ? insertionIndex : this.builder.length;
+            const hoistedFunctionsFlat = this.hoistedFunctions.flat();
+            const hoisted = [...this.hoistedDefinitions, ...hoistedFunctionsFlat];
+            this.builder = [
+                ...this.builder.slice(0, insertAt),
+                ...hoisted,
+                ...this.builder.slice(insertAt),
+            ];
+        }
 
         // Add all accumulated global string definitions at the end
         this.llvmHelper.getGlobalStrings().forEach(def => {
@@ -126,16 +287,43 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     private emitGlobalDefinitions(nodes: ASTNode[]): void {
+        const functions: FunctionDeclaration[] = [];
+
+        // 先处理导入和类型定义，确保模块和类型可见；收集函数
         nodes.forEach(node => {
-            if (node instanceof ClassDeclaration || node instanceof StructDeclaration) {
+            if (node instanceof ImportStmt) {
+                this.visitImportStmt(node);
+            } else if (node instanceof ClassDeclaration || node instanceof StructDeclaration) {
                 (node as Stmt).accept(this);
+            } else if (node instanceof FunctionDeclaration) {
+                functions.push(node);
+            } else if (node instanceof DeclareFunction) {
+                this.visitDeclareFunction(node); // declare 函数直接发出声明
+            }
+        });
+
+        // 第二遍：先声明所有函数符号（防止调用时未定义）
+        functions.forEach(fn => {
+            const key = this.getFunctionKey(fn);
+            if (!this.declaredSymbols.has(key)) {
+                this.declareFunctionSymbol(fn);
+                this.declaredSymbols.add(key);
+            }
+        });
+
+        // 第三遍：发出函数定义
+        functions.forEach(fn => {
+            const key = this.getFunctionKey(fn);
+            if (!this.generatedFunctions.has(key)) {
+                this.emitFunctionDefinition(fn);
+                this.generatedFunctions.add(key);
             }
         });
         this.builder.push("");
     }
 
     private enterScope(): void {
-        this.currentScope = new Scope(this.currentScope);
+        this.currentScope = new Scope(this.currentScope, this.currentScope.depth + 1);
     }
 
     private exitScope(): void {
@@ -321,14 +509,17 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         throw new Error(`Cannot convert type ${irValue.type} to i64 for syscall.`);
     }
 
+    private getFunctionKey(decl: FunctionDeclaration): string {
+        return `${this.sourceFilePath}:${decl.name.lexeme}`;
+    }
+
     private emitLangItemStructs(): void {
         // string struct
         if (!this.classDefinitions.has(LangItems.string.className)) {
-            this.emit(`${LangItems.string.structName} = type { i8*, i64, i64 }`, false);
+            this.emit(`${LangItems.string.structName} = type { i8*, i64 }`, false);
             const members = new Map<string, MemberEntry>([
                 [LangItems.string.members.ptr ? 'ptr' : 'ptr', { llvmType: 'i8*', index: LangItems.string.members.ptr.index }],
                 [LangItems.string.members.len ? 'len' : 'len', { llvmType: 'i64', index: LangItems.string.members.len.index }],
-                [LangItems.string.members.cap ? 'cap' : 'cap', { llvmType: 'i64', index: LangItems.string.members.cap.index }],
             ]);
             this.classDefinitions.set(LangItems.string.className, {
                 llvmType: LangItems.string.structName,
@@ -445,7 +636,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.emit(`${totalLen} = add i64 ${leftLen}, ${rightLen}`);
 
         // Allocate buffer via syscall brk bump allocator (no libc)
-        const sizeToAlloc = totalLen; // bytes since string stores raw bytes
+        const totalLenWithNull = this.llvmHelper.getNewTempVar();
+        this.emit(`${totalLenWithNull} = add i64 ${totalLen}, 1`);
+        const sizeToAlloc = totalLenWithNull;
         this.ensureHeapGlobals();
 
         // Initialize heap brk if needed
@@ -502,6 +695,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const copyRight = this.builtins.createMemcpy(destRight, rightDataPtr, rightLen);
         this.emit(copyRight);
 
+        // Add null terminator
+        const nullTerminatorPtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${nullTerminatorPtr} = getelementptr inbounds i8, i8* ${destPtr}, i64 ${totalLen}`);
+        this.emit(`store i8 0, i8* ${nullTerminatorPtr}, align 1`);
+
         // Build result string struct on stack
         const resultStructPtr = this.llvmHelper.getNewTempVar();
         this.emit(`${resultStructPtr} = alloca ${LangItems.string.structName}, align 8`);
@@ -511,15 +709,12 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const resLenField = this.llvmHelper.getNewTempVar();
         this.emit(`${resLenField} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${resultStructPtr}, i32 0, i32 ${LangItems.string.members.len.index}`);
         this.emit(`store i64 ${totalLen}, i64* ${resLenField}, align 8`);
-        const resCapField = this.llvmHelper.getNewTempVar();
-        this.emit(`${resCapField} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${resultStructPtr}, i32 0, i32 ${LangItems.string.members.cap.index}`);
-        this.emit(`store i64 ${totalLen}, i64* ${resCapField}, align 8`);
 
         return { value: resultStructPtr, type: `${LangItems.string.structName}*` };
     }
 
     // Ensure an IRValue representing a string is a pointer to the string struct.
-    private ensureStringPointer(val: IRValue): IRValue | null {
+    public ensureStringPointer(val: IRValue): IRValue | null {
         const structType = LangItems.string.structName;
         const ptrType = `${structType}*`;
         if (val.type === ptrType) return val;
@@ -532,12 +727,135 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return null;
     }
 
+    private coerceValue(value: IRValue, targetType: string): IRValue {
+        if (value.type === targetType) return value;
+
+        const converted = this.llvmHelper.getNewTempVar();
+        const srcType = value.type;
+        const dstType = targetType;
+
+        const isSrcInt = srcType.startsWith('i') && !srcType.endsWith('*');
+        const isDstInt = dstType.startsWith('i') && !dstType.endsWith('*');
+        const isSrcFloat = srcType.startsWith('f');
+        const isDstFloat = dstType.startsWith('f');
+        const isSrcPtr = srcType.endsWith('*');
+        const isDstPtr = dstType.endsWith('*');
+
+        if (isSrcInt && isDstInt) {
+            const srcBits = parseInt(srcType.slice(1), 10);
+            const dstBits = parseInt(dstType.slice(1), 10);
+            if (dstBits > srcBits) {
+                this.emit(`${converted} = sext ${srcType} ${value.value} to ${dstType}`);
+            } else if (dstBits < srcBits) {
+                this.emit(`${converted} = trunc ${srcType} ${value.value} to ${dstType}`);
+            } else {
+                this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+            }
+        } else if (isSrcFloat && isDstFloat) {
+            const srcBits = parseInt(srcType.slice(1), 10);
+            const dstBits = parseInt(dstType.slice(1), 10);
+            if (dstBits > srcBits) {
+                this.emit(`${converted} = fpext ${srcType} ${value.value} to ${dstType}`);
+            } else if (dstBits < srcBits) {
+                this.emit(`${converted} = fptrunc ${srcType} ${value.value} to ${dstType}`);
+            } else {
+                this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+            }
+        } else if (isSrcInt && isDstFloat) {
+            this.emit(`${converted} = sitofp ${srcType} ${value.value} to ${dstType}`);
+        } else if (isSrcFloat && isDstInt) {
+            this.emit(`${converted} = fptosi ${srcType} ${value.value} to ${dstType}`);
+        } else if (isSrcPtr && isDstPtr) {
+            this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+        } else if (isSrcInt && isDstPtr) {
+            this.emit(`${converted} = inttoptr ${srcType} ${value.value} to ${dstType}`);
+        } else if (isSrcPtr && isDstInt) {
+            this.emit(`${converted} = ptrtoint ${srcType} ${value.value} to ${dstType}`);
+        } else {
+            this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+        }
+
+        return { value: converted, type: targetType };
+    }
+
     // --- Expression Visitor methods ---
+
+    visitAddressOfExpr(expr: AddressOfExpr): IRValue {
+        // Evaluate the inner expression to get its storage location
+        // This is typically for local variables (alloca'd) or global variables
+        if (expr.expression instanceof IdentifierExpr) {
+            const varName = expr.expression.name.lexeme;
+            const entry = this.currentScope.find(varName);
+            if (!entry) {
+                throw new Error(`无法获取未声明变量 '${varName}' 的地址。`);
+            }
+            const ptrType = `${entry.llvmType}*`;
+            const asInt = this.llvmHelper.getNewTempVar();
+            this.emit(`${asInt} = ptrtoint ${ptrType} ${entry.ptr} to i64`);
+            return { value: asInt, type: 'i64', ptr: entry.ptr, ptrType };
+        } else if (expr.expression instanceof GetExpr) {
+            // Getting address of a property, e.g., &obj.prop
+            const objectInfo = expr.expression.object.accept(this);
+            const memberName = expr.expression.name.lexeme;
+
+            const isPointer = objectInfo.type.endsWith('*');
+            const baseType = isPointer ? objectInfo.type.slice(0, -1) : objectInfo.type;
+
+            if (!baseType.startsWith('%struct.')) {
+                 throw new Error(`无法获取非结构体类型属性 '${memberName}' 的地址: ${objectInfo.type}`);
+            }
+
+            const className = baseType.substring('%struct.'.length);
+            const classEntry = this.classDefinitions.get(className);
+            if (!classEntry) {
+                throw new Error(`未定义类型 '${className}' 的类定义。`);
+            }
+
+            const memberEntry = classEntry.members.get(memberName);
+            if (!memberEntry) {
+                throw new Error(`类 '${className}' 中未定义成员 '${memberName}'。`);
+            }
+            
+            const memberPtrVar = this.llvmHelper.getNewTempVar();
+            if (isPointer) { // Object itself is a pointer (e.g., class instance)
+                this.emit(`${memberPtrVar} = getelementptr inbounds ${classEntry.llvmType}, ${objectInfo.type} ${objectInfo.value}, i32 0, i32 ${memberEntry.index}`);
+            } else { // Object is a struct value (passed by value)
+                // This case is tricky. If objectInfo.value is the struct value, we need its *address* first.
+                // For simplicity, let's assume getting address of properties is primarily for pointer-like objects.
+                throw new Error(`尚不支持获取值类型结构体属性 '${memberName}' 的地址。`);
+            }
+            const asInt = this.llvmHelper.getNewTempVar();
+            this.emit(`${asInt} = ptrtoint ${memberEntry.llvmType}* ${memberPtrVar} to i64`);
+            return { value: asInt, type: 'i64', ptr: memberPtrVar, ptrType: `${memberEntry.llvmType}*` };
+
+        }
+        throw new Error(`无法获取表达式 '${expr.expression.constructor.name}' 的地址。`);
+    }
+
+    visitDereferenceExpr(expr: DereferenceExpr): IRValue {
+        const ptrValue = expr.expression.accept(this); // This should yield an IRValue where type is a pointer type (e.g., i32*)
+        let ptrType = ptrValue.type;
+        let ptrVar = ptrValue.value;
+
+        if (!ptrType.endsWith('*')) {
+            if (ptrType === 'i64' && ptrValue.ptr) {
+                ptrVar = ptrValue.ptr;
+                ptrType = ptrValue.ptrType || 'i8*';
+            } else {
+                throw new Error(`解引用操作符 '*' 只能用于指针类型，但得到了 '${ptrValue.type}'。`);
+            }
+        }
+
+        const baseType = ptrType.slice(0, -1); // Remove '*' to get the base type
+        const resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = load ${baseType}, ${ptrType} ${ptrVar}, align ${this.llvmHelper.getAlign(baseType)}`);
+        return { value: resultVar, type: baseType, address: ptrVar };
+    }
 
     visitLiteralExpr(expr: LiteralExpr): IRValue {
         if (typeof expr.value === 'number') {
             if (Number.isInteger(expr.value)) return { value: `${expr.value}`, type: 'i64' }; // 默认整数推断为 i64
-            return { value: `${expr.value}`, type: 'double' };
+            return { value: `${expr.value}`, type: 'f64' };
         }
         if (typeof expr.value === 'string') {
             // Updated to handle managed strings
@@ -555,45 +873,83 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     
     visitIdentifierExpr(expr: IdentifierExpr): IRValue {
         const name = expr.name.lexeme;
+
+        // 检查是否为捕获的变量
+        if (this.currentFunction && this.currentFunction.capturedVariables) {
+            const captured = (this.currentFunction.capturedVariables as CapturedVariableInfo[]).find(v => v.name === name);
+            if (captured) {
+                // 这是一个捕获的变量，通过环境指针访问它
+                const envEntry = this.currentScope.find('__env_ptr');
+                if (!envEntry) {
+                    throw new Error("内部错误：在作用域中未找到闭包环境指针 '__env_ptr'。");
+                }
+                const envPtr = envEntry.ptr; // 这是环境指针的值, 例如 %arg0
+                const envStructType = envEntry.llvmType.slice(0, -1); // 从指针类型获取结构体类型
+
+                const capturedIndex = (this.currentFunction.capturedVariables as CapturedVariableInfo[]).findIndex(v => v.name === name);
+
+                // 1. 获取指向环境结构体中保存我们变量指针的字段的指针
+                const envFieldPtr = this.llvmHelper.getNewTempVar();
+                this.emit(`${envFieldPtr} = getelementptr inbounds ${envStructType}, ${envEntry.llvmType} ${envPtr}, i32 0, i32 ${capturedIndex}`);
+
+                // 2. 从环境字段中加载我们变量的指针
+                const capturedVarAddrPtr = this.llvmHelper.getNewTempVar();
+                const capturedVarType = captured.llvmType; // 例如, i32
+                const capturedVarPtrType = `${capturedVarType}*`; // 例如, i32*
+                this.emit(`${capturedVarAddrPtr} = load ${capturedVarPtrType}, ${capturedVarPtrType}* ${envFieldPtr}, align 8`);
+
+                // 3. 使用加载的指针加载变量的实际值
+                const loadedValue = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedValue} = load ${capturedVarType}, ${capturedVarPtrType} ${capturedVarAddrPtr}, align ${this.llvmHelper.getAlign(capturedVarType)}`);
+
+                return { value: loadedValue, type: capturedVarType, address: capturedVarAddrPtr };
+            }
+        }
+
+        if (this.debug) console.log("Looking up identifier:", name, "in scope depth:", this.currentScope.depth);
         const entry = this.currentScope.find(name);
         
         if (!entry) {
+            if (this.debug) console.log("ERROR: Identifier not found:", name);
             // Special handling for 'syscall' intrinsic
             if (name === 'syscall') {
                 return { value: '__syscall6', type: 'internal_syscall' }; // Use internal syscall wrapper
             }
-            throw new Error(`Undefined variable or function: ${name}`);
+            throw new Error(`Undefined variable or function: ${name}`); // This is the error being thrown
         }
+        if (this.debug) console.log("Found identifier:", name, "entry:", entry);
 
+        // Module globals and function pointers are already pointers, their 'ptr' is their 'value'
+        // For these, the 'value' *is* the pointer/address, so we don't need a separate 'address' field.
         if (entry.llvmType === 'module') {
-            return { value: entry.ptr, type: 'module' };
+             return { value: entry.ptr, type: entry.llvmType };
+        }
+        if (entry.llvmType.endsWith(')*')) { // function pointer
+            if (entry.ptr.startsWith('@')) {
+                return { value: entry.ptr, type: entry.llvmType };
+            }
+            const loadedFunc = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedFunc} = load ${entry.llvmType}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+            return { value: loadedFunc, type: entry.llvmType, address: entry.ptr };
         }
 
-        // Module globals: return the global pointer directly (avoid double-loading)
+        // Module globals (structs)
         for (const info of this.moduleObjects.values()) {
-            if (entry.ptr === info.globalName) {
-                return { value: info.globalName, type: `${info.structName}*` };
+            if (entry.ptr === info.globalName) { // e.g. @module_io, its type is %struct.module_io*
+                // Here, entry.ptr is the address of the global module struct.
+                // The 'value' should be this address, and 'address' should also be this address.
+                return { value: info.globalName, type: `${info.structName}*`, address: info.globalName };
             }
         }
 
-        if (entry.llvmType.includes('(')) { // It's a function pointer
-             return { value: entry.ptr, type: entry.llvmType };
-        }
-        
         const tempVar = this.llvmHelper.getNewTempVar();
-        // 引用类型（非函数指针）：加载出指针值
-        if (entry.llvmType.endsWith('*')) {
-            this.emit(`${tempVar} = load ${entry.llvmType}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
-            return { value: tempVar, type: entry.llvmType };
-        }
-        // 值类型结构体: 加载整个结构体
-        if (entry.llvmType.startsWith('%struct.')) {
-            this.emit(`${tempVar} = load ${entry.llvmType}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
-            return { value: tempVar, type: entry.llvmType };
-        }
-        // 其他值类型：加载值
+        // `entry.ptr` 是变量在栈上（alloca）或全局（global）的存储地址。
+        // `entry.llvmType` 是该变量本身的 LLVM 类型 (例如 i32*, %struct.String, i32)。
+        // 我们需要加载 `entry.ptr` 指向的“值”。
         this.emit(`${tempVar} = load ${entry.llvmType}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
-        return { value: tempVar, type: entry.llvmType };
+        
+        // 返回的 IRValue 包含加载出的值，值的类型，以及变量本身的存储地址。
+        return { value: tempVar, type: entry.llvmType, address: entry.ptr };
     }
 
     visitBinaryExpr(expr: BinaryExpr): IRValue {
@@ -698,9 +1054,45 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             }
         }
 
-        const calleeInfo = expr.callee.accept(this) as IRValue;
-        const funcRef = calleeInfo.value; // The callable reference (function symbol or pointer)
+        let calleeInfo = expr.callee.accept(this) as IRValue;
         const argValues = expr.args.map(arg => arg.accept(this) as IRValue);
+
+        // --- 闭包调用处理 ---
+        // 如果被调用者是一个闭包对象 (即 { func*, env* }* 类型),
+        // 我们需要解构它以获取真正的函数指针和环境指针。
+        if (calleeInfo.type.startsWith('{') && calleeInfo.type.endsWith('}*')) {
+            const closureObjPtr = calleeInfo.value;
+            const closureObjType = calleeInfo.type.slice(0, -1);
+            if (this.debug) console.log(`Unwrap closure: objPtr=${closureObjPtr}, objType=${closureObjType}`);
+
+            // 1. 从闭包对象中加载函数指针 (位于字段 0)
+            const funcPtrFieldPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${funcPtrFieldPtr} = getelementptr inbounds ${closureObjType}, ${calleeInfo.type} ${closureObjPtr}, i32 0, i32 0`);
+            
+            // 从结构体类型字符串中提取函数指针和环境指针类型
+            const fields = this.splitStructFields(closureObjType);
+            if (fields.length < 2) {
+                throw new Error(`无法从闭包对象类型中提取字段类型: ${closureObjType}`);
+            }
+            const loadedFuncPtrType = fields[0]!; // Already ends with '*'
+            const loadedFuncPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedFuncPtr} = load ${loadedFuncPtrType}, ${loadedFuncPtrType}* ${funcPtrFieldPtr}, align 8`);
+            
+            // 2. 从闭包对象中加载环境指针 (位于字段 1)
+            const envPtrFieldPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${envPtrFieldPtr} = getelementptr inbounds ${closureObjType}, ${calleeInfo.type} ${closureObjPtr}, i32 0, i32 1`);
+
+            const loadedEnvPtrType = fields[1]!;
+            const loadedEnvPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedEnvPtr} = load ${loadedEnvPtrType}, ${loadedEnvPtrType}* ${envPtrFieldPtr}, align 8`);
+            
+            // 3. 更新 calleeInfo 并将环境指针作为第一个参数
+            calleeInfo = { value: loadedFuncPtr, type: loadedFuncPtrType };
+            argValues.unshift({ value: loadedEnvPtr, type: loadedEnvPtrType });
+        }
+        // --- 结束闭包调用处理 ---
+
+        const funcRef = calleeInfo.value; // The callable reference (function symbol or pointer)
 
         // Special-case syscall intrinsic
         if (calleeInfo.type === 'internal_syscall' || calleeInfo.value === '__syscall6') {
@@ -722,14 +1114,53 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             });
         }
 
-        const funcTypeMatch = calleeInfo.type.match(/^(.*?)\((.*)\)\*$/);
-        if (!funcTypeMatch || funcTypeMatch.length < 3) {
-            throw new Error(`Attempted to call a non-function type: ${calleeInfo.type}`);
+        if (this.debug) console.log(`Call candidate: callee=${calleeInfo.value}, type=${calleeInfo.type}`);
+        const typeStr = calleeInfo.type.trim();
+        if (!typeStr.endsWith('*')) {
+            console.error(`Call target not a function pointer: callee=${calleeInfo.value}, type=${calleeInfo.type}`);
+            throw new Error(`Attempted to call a non-function type: ${calleeInfo.type} (callee: ${calleeInfo.value})`);
         }
 
-        const returnType = funcTypeMatch[1]!.trim();
-        const paramTypesRaw = funcTypeMatch[2]!.trim();
-        const paramTypes = paramTypesRaw ? paramTypesRaw.split(',').map(p => p.trim()).filter(p => p.length > 0) : [];
+        // Parse function type string like "ret (param1, param2)*" even when params are function pointers.
+        const withoutStar = typeStr.slice(0, -1).trim(); // drop trailing '*'
+        const lastParen = withoutStar.lastIndexOf(')');
+        let paramListStart = -1;
+        let scanDepth = 0;
+        for (let i = lastParen; i >= 0; i--) {
+            const ch = withoutStar[i];
+            if (ch === ')') scanDepth++;
+            else if (ch === '(') {
+                scanDepth--;
+                if (scanDepth === 0) {
+                    paramListStart = i;
+                    break;
+                }
+            }
+        }
+
+        if (paramListStart < 0 || lastParen < paramListStart) {
+            throw new Error(`Attempted to call a non-function type: ${calleeInfo.type} (callee: ${calleeInfo.value})`);
+        }
+        const returnType = withoutStar.slice(0, paramListStart).trim();
+        const paramTypesRaw = withoutStar.slice(paramListStart + 1, lastParen);
+
+        // Split parameters while respecting nested parentheses in function-pointer params.
+        const paramTypes: string[] = [];
+        let current = '';
+        let depth = 0;
+        for (const ch of paramTypesRaw) {
+            if (ch === ',' && depth === 0) {
+                if (current.trim().length > 0) paramTypes.push(current.trim());
+                current = '';
+                continue;
+            }
+            if (ch === '(' || ch === '{' || ch === '[') depth++;
+            if (ch === ')' || ch === '}' || ch === ']') depth = Math.max(0, depth - 1);
+            current += ch;
+        }
+        if (current.trim().length > 0) paramTypes.push(current.trim());
+
+        if (this.debug) console.log(`Call: callee=${calleeInfo.value}, type=${calleeInfo.type}, ret=${returnType}, params=[${paramTypes.join(', ')}]`);
         
         let callArgs: string[] = [];
 
@@ -749,35 +1180,124 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
 
         argValues.forEach((arg, idx) => {
-            const expectedParam = effectiveParamTypes[idx] || arg.type; // Removed paramOffset as sret is gone
+            const expectedParam = effectiveParamTypes[idx]; // The expected LLVM type for this parameter
             let argValue = arg.value;
             let argType = arg.type;
 
-            // Handle passing struct by value. The 'arg' is the struct value itself.
-            if (argType.startsWith('%struct.') && expectedParam && !expectedParam.endsWith('*')) {
-                callArgs.push(`${argType} ${argValue}`);
-                return; // Continue to next argument
+            // 如果参数数量不匹配，或者没有期望的参数类型，我们跳过隐式引用，但仍会尝试类型转换
+            if (!expectedParam) {
+                callArgs.push(`${argType} ${argValue}`); // If no expected type, pass as-is after conversions
+                return;
             }
 
-            // Cast between pointer types if needed
-            if (expectedParam && expectedParam !== argType && expectedParam.endsWith('*') && argType.endsWith('*')) {
-                const casted = this.llvmHelper.getNewTempVar();
-                this.emit(`${casted} = bitcast ${argType} ${argValue} to ${expectedParam}`);
-                argValue = casted;
-                argType = expectedParam;
-            } else if (expectedParam && expectedParam !== argType && expectedParam === 'i64' && argType === 'i32') {
-                const extended = this.llvmHelper.getNewTempVar();
-                this.emit(`${extended} = sext i32 ${argValue} to i64`);
-                argValue = extended;
-                argType = 'i64';
-            } else if (expectedParam && expectedParam !== argType && expectedParam === 'i32' && argType === 'i1') {
-                const extended = this.llvmHelper.getNewTempVar();
-                this.emit(`${extended} = zext i1 ${argValue} to i32`);
-                argValue = extended;
-                argType = 'i32';
+            // --- PARAMETER PASSING SEMANTICS & IMPLICIT REFERENCING ---
+            // 规则1: 如果函数期望 T*，而传入的是 T，则自动获取地址。
+            if (expectedParam.endsWith('*') && !argType.endsWith('*')) {
+                const expectedBaseType = expectedParam.slice(0, -1); // 期望的基础类型
+                // 检查基础类型是否匹配 (例如，期望 i32*，传入 i32)
+                if (expectedBaseType === argType) {
+                    if (!arg.address) {
+                        // 如果参数是字面量或表达式结果，没有直接地址，
+                        // 则在栈上分配临时空间存储值，然后传递该临时空间的地址。
+                        const tempAlloca = this.llvmHelper.getNewTempVar();
+                        this.emit(`${tempAlloca} = alloca ${argType}, align ${this.llvmHelper.getAlign(argType)}`);
+                        this.emit(`store ${argType} ${argValue}, ${argType}* ${tempAlloca}, align ${this.llvmHelper.getAlign(argType)}`);
+                        argValue = tempAlloca; // 现在 argValue 是临时 alloca 的指针
+                    } else {
+                        // 如果参数有直接地址 (例如，它本身就是个变量)，则使用其地址。
+                        argValue = arg.address;
+                    }
+                    argType = expectedParam; // 现在参数类型是期望的指针类型
+                }
             }
+            // --- END PARAMETER PASSING SEMANTICS & IMPLICIT REFERENCING ---
 
-            callArgs.push(`${expectedParam || argType} ${argValue}`);
+
+            // --- 类型转换 (T to expectedParam) ---
+            if (expectedParam !== argType) {
+                // Struct pointer -> struct value (load)
+                if (expectedParam.startsWith('%struct.') && !expectedParam.endsWith('*') && argType === `${expectedParam}*`) {
+                    const loadedStruct = this.llvmHelper.getNewTempVar();
+                    this.emit(`${loadedStruct} = load ${expectedParam}, ${expectedParam}* ${argValue}, align ${this.llvmHelper.getAlign(expectedParam)}`);
+                    argValue = loadedStruct;
+                    argType = expectedParam;
+                } else {
+                const convertedArg = this.llvmHelper.getNewTempVar();
+                const currentArgType = argType;
+                const currentArgValue = argValue;
+
+                const isCurrentInt = currentArgType.startsWith('i');
+                const isExpectedInt = expectedParam.startsWith('i');
+                const isCurrentFloat = currentArgType.startsWith('f');
+                const isExpectedFloat = expectedParam.startsWith('f');
+                const isCurrentPtr = currentArgType.endsWith('*');
+                const isExpectedPtr = expectedParam.endsWith('*');
+
+                if (isCurrentInt && isExpectedInt) {
+                    const currentBits = parseInt(currentArgType.slice(1), 10);
+                    const expectedBits = parseInt(expectedParam.slice(1), 10);
+                    if (expectedBits > currentBits) {
+                        this.emit(`${convertedArg} = sext ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    } else if (expectedBits < currentBits) {
+                        this.emit(`${convertedArg} = trunc ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    } else { // Same bit width, but possibly different sign handling (though LLVM handles iN types uniformly for bitcast)
+                        this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    }
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentFloat && isExpectedFloat) {
+                    const currentBits = parseInt(currentArgType.slice(1), 10);
+                    const expectedBits = parseInt(expectedParam.slice(1), 10);
+                    if (expectedBits > currentBits) { // e.g., f32 to f64
+                        this.emit(`${convertedArg} = fpext ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    } else if (expectedBits < currentBits) { // e.g., f64 to f32
+                        this.emit(`${convertedArg} = fptrunc ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    }
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentInt && isExpectedFloat) { // int to float
+                    this.emit(`${convertedArg} = sitofp ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentFloat && isExpectedInt) { // float to int
+                    this.emit(`${convertedArg} = fptosi ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentPtr && isExpectedPtr) { // pointer to pointer bitcast
+                    this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentInt && isExpectedPtr) { // int to pointer
+                    this.emit(`${convertedArg} = inttoptr ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (isCurrentPtr && isExpectedInt) { // pointer to int
+                    this.emit(`${convertedArg} = ptrtoint ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                    argValue = convertedArg;
+                    argType = expectedParam;
+                } else if (currentArgType.startsWith('%struct.') && expectedParam.startsWith('%struct.')) {
+                    // Struct to struct conversion (e.g. from string literal constant to local string struct)
+                    // If the current arg is a pointer to struct, and expected is a struct VALUE, we need to load.
+                    // This scenario is mostly handled by implicit referencing.
+                    // If it's a direct struct value to struct value, a bitcast might be needed if types are just nominal.
+                    // For now, assume implicit referencing handles the common case.
+                    // If currentArgType is %struct.foo* and expectedParam is %struct.bar, implies a load then bitcast value or error.
+                    // For now, if types are literally different struct types, throw error unless specific conversion is defined.
+                    // Or implicitly bitcast if compatible by size. For now, we will rely on strict type matching unless explicit casts.
+                } else {
+                    // Fallback for unhandled conversions
+                    // throw new Error(`无法转换类型从 ${currentArgType} 到 ${expectedParam}。`);
+                    // For robustness, allow bitcast as a last resort, assuming LLVM will validate.
+                    if (currentArgType !== expectedParam) { // Only if genuinely different
+                        this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                }
+                }
+            }
+            // --- END 类型转换 ---
+            callArgs.push(`${argType} ${argValue}`);
         });
 
         const callInstr = `call ${returnType} ${funcRef}(${callArgs.join(', ')})`;
@@ -800,12 +1320,44 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         if (expr.target instanceof IdentifierExpr) {
             const varName = expr.target.name.lexeme;
+
+            // Handle captured variable assignment inside closures
+            if (this.currentFunction && this.currentFunction.capturedVariables) {
+                const captured = (this.currentFunction.capturedVariables as CapturedVariableInfo[]).find(v => v.name === varName);
+                if (captured) {
+                    const envEntry = this.currentScope.find('__env_ptr');
+                    if (!envEntry) throw new Error("内部错误：在作用域中未找到闭包环境指针 '__env_ptr'。");
+                    const envPtr = envEntry.ptr;
+                    const envStructType = envEntry.llvmType.slice(0, -1);
+                    const capturedIndex = (this.currentFunction.capturedVariables as CapturedVariableInfo[]).findIndex(v => v.name === varName);
+
+                    const envFieldPtr = this.llvmHelper.getNewTempVar();
+                    this.emit(`${envFieldPtr} = getelementptr inbounds ${envStructType}, ${envEntry.llvmType} ${envPtr}, i32 0, i32 ${capturedIndex}`);
+
+                    const capturedVarPtr = this.llvmHelper.getNewTempVar();
+                    const capturedVarPtrType = `${captured.llvmType}*`;
+                    this.emit(`${capturedVarPtr} = load ${capturedVarPtrType}, ${capturedVarPtrType}* ${envFieldPtr}, align 8`);
+
+                    const coerced = value.type === captured.llvmType ? value : this.coerceValue(value, captured.llvmType);
+                    this.emit(`store ${captured.llvmType} ${coerced.value}, ${capturedVarPtrType} ${capturedVarPtr}, align ${this.llvmHelper.getAlign(captured.llvmType)}`);
+                    return coerced;
+                }
+            }
+
             const entry = this.currentScope.find(varName);
             if (!entry) {
                 throw new Error(`Assignment to undeclared variable: ${varName}`);
             }
-            this.emit(`store ${value.type} ${value.value}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
-            return value;
+            let toStore = value;
+            if (value.type === `${entry.llvmType}*` && entry.llvmType.startsWith('%struct.') && !entry.llvmType.endsWith('*')) {
+                const loadedStruct = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedStruct} = load ${entry.llvmType}, ${entry.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+                toStore = { value: loadedStruct, type: entry.llvmType };
+            } else if (value.type !== entry.llvmType) {
+                toStore = this.coerceValue(value, entry.llvmType);
+            }
+            this.emit(`store ${entry.llvmType} ${toStore.value}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+            return toStore;
         } else if (expr.target instanceof GetExpr) { // Handle object.property = value
             const objectInfo = expr.target.object.accept(this) as IRValue; // Evaluate object (e.g., 'this')
             const memberName = expr.target.name.lexeme; // Get property name
@@ -832,9 +1384,28 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             this.emit(`${memberPtrVar} = getelementptr inbounds ${classEntry.llvmType}, ${objectInfo.type} ${objectInfo.value}, i32 0, i32 ${memberEntry.index}`);
             
             // Store the value into the member
-            this.emit(`store ${value.type} ${value.value}, ${memberEntry.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
-            return value;
+            const coerced = (value.type === `${memberEntry.llvmType}*` && memberEntry.llvmType.startsWith('%struct.'))
+                ? (() => {
+                    const loaded = this.llvmHelper.getNewTempVar();
+                    this.emit(`${loaded} = load ${memberEntry.llvmType}, ${memberEntry.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
+                    return { value: loaded, type: memberEntry.llvmType };
+                })()
+                : (value.type === memberEntry.llvmType ? value : this.coerceValue(value, memberEntry.llvmType));
+            this.emit(`store ${memberEntry.llvmType} ${coerced.value}, ${memberEntry.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
+            return coerced;
 
+        } else if (expr.target instanceof DereferenceExpr) { // Handle *ptr = value
+            const targetPtr = expr.target.expression.accept(this); // Evaluate `ptr` in `*ptr`
+            
+            if (!targetPtr.type.endsWith('*')) {
+                throw new Error(`无法赋值给非指针类型 '${targetPtr.type}' 的解引用结果。`);
+            }
+            // The base type of the pointer is the type of the value being stored.
+            const baseType = targetPtr.type.slice(0, -1); 
+
+            const coerced = value.type === baseType ? value : this.coerceValue(value, baseType);
+            this.emit(`store ${baseType} ${coerced.value}, ${targetPtr.type} ${targetPtr.value}, align ${this.llvmHelper.getAlign(baseType)}`);
+            return coerced;
         } else {
             throw new Error(`Invalid assignment target: ${expr.target.constructor.name}`);
         }
@@ -871,13 +1442,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             }
         }
         
-        // Use 'constant' keyword for global constants
-        this.emit(`${mangledName} = ${linkage}constant ${llvmType} ${initialValue}, align ${this.llvmHelper.getAlign(llvmType)}`, false);
-
         this.globalScope.define(varName, {
             llvmType: llvmType,
             ptr: mangledName,
-            isPointer: llvmType.endsWith('*')
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
         });
     }
     
@@ -902,7 +1471,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.globalScope.define(varName, {
             llvmType: llvmType,
             ptr: mangledName,
-            isPointer: llvmType.endsWith('*')
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
         });
     }
 
@@ -915,39 +1485,43 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             initValue = stmt.initializer.accept(this);
         }
 
-        if (stmt.type) {
+        if (stmt.type) { // 显式类型注解
             llvmType = this.llvmHelper.getLLVMType(stmt.type);
-        } else if (initValue) {
-            // 类型省略时做推断
-            if (initValue.type === `${LangItems.string.structName}*`) {
-                // 字符串字面量推断为值类型 string（结构体）
+        } else if (initValue) { // 从初始化器推断类型
+            // 字符串字面量推断为值类型 string（结构体）
+            if (initValue.type === `${LangItems.string.structName}*` && !initValue.type.endsWith(')*')) { // 排除函数指针
                 llvmType = LangItems.string.structName;
+            } else if (initValue.ptrType) {
+                // 地址推断为指针类型
+                llvmType = initValue.ptrType;
             } else {
                 llvmType = initValue.type;
             }
         } else {
-            throw new Error(`Cannot declare variable '${varName}' without a type or an initializer.`);
+            throw new Error(`变量 '${varName}' 声明时必须指定类型或提供初始化器。`);
         }
+
+        if (this.debug) console.log(`Let ${varName} inferred LLVM type: ${llvmType}, initValue.type: ${initValue ? initValue.type : 'null'}`);
 
         const varPtr = `%${varName}`;
         this.emit(`${varPtr} = alloca ${llvmType}, align ${this.llvmHelper.getAlign(llvmType)}`);
         
-        // After alloca, the type of the variable itself (the symbol) is its llvmType.
-        // It's not a pointer type unless llvmType itself is a pointer.
         this.currentScope.define(varName, {
             llvmType: llvmType,
             ptr: varPtr,
-            isPointer: llvmType.endsWith('*')
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
         });
 
         if (initValue) {
-            // If we are storing a pointer to a struct into a struct variable (e.g. string literal init)
-            if (initValue.type === `${llvmType}*`) {
+            // 如果初始化器是结构体指针 (%struct.String*) 且变量是结构体值 (%struct.String)
+            if (initValue.type === `${llvmType}*` && !llvmType.endsWith('*') && llvmType.startsWith('%struct.')) {
                 const loadedStruct = this.llvmHelper.getNewTempVar();
                 this.emit(`${loadedStruct} = load ${llvmType}, ${llvmType}* ${initValue.value}, align ${this.llvmHelper.getAlign(llvmType)}`);
                 this.emit(`store ${llvmType} ${loadedStruct}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
             } else {
-                this.emit(`store ${initValue.type} ${initValue.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+                const coerced = this.coerceValue(initValue, llvmType);
+                this.emit(`store ${llvmType} ${coerced.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
             }
         }
     }
@@ -1026,7 +1600,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 // SRET convention: copy the struct pointed to by retVal.value into the sret pointer
                 // retVal.value is expected to be a pointer to the struct to be returned (e.g., %struct.string*)
 
-                const structSize = 24; // Hardcoding for %struct.string size (8 bytes for ptr, 8 for len, 8 for cap)
+                const structSize = 16; // Hardcoding for %struct.string size (8 bytes for ptr, 8 for len)
                 const sizeOfStructI64 = `${structSize}`;
 
                 // Bitcast both pointers to i8* for memcpy
@@ -1085,22 +1659,99 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     visitFunctionDeclaration(decl: FunctionDeclaration): void {
-        this.currentFunction = decl;
-        const originalFuncName = decl.name.lexeme; // Store original name
+        const key = this.getFunctionKey(decl);
+        if (!this.declaredSymbols.has(key)) {
+            this.declareFunctionSymbol(decl);
+            this.declaredSymbols.add(key);
+        }
+        if (!this.generatedFunctions.has(key)) {
+            this.emitFunctionDefinition(decl);
+            this.generatedFunctions.add(key);
+        }
+    }
+
+    public declareFunctionSymbol(decl: FunctionDeclaration): void {
+        this.currentFunction = decl; // Temporarily set currentFunction for context
+        const originalFuncName = decl.name.lexeme;
         let funcNameInIR = originalFuncName;
+
+        if (this.debug) console.log("Declaring symbol for function:", originalFuncName);
         
         // Determine mangled name for global functions
-        // All exported functions will now use a unified mangling scheme: _mod_moduleNamePart_funcName
-        if (decl.isExported) { // Only exported functions get this mangling
+        if (decl.isExported) {
             const relativeSourcePath = path.relative(process.cwd(), this.sourceFilePath);
             const moduleNamePart = relativeSourcePath.replace(/\.yu$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
             funcNameInIR = `_mod_${moduleNamePart}_${originalFuncName}`;
-        } else if (this.mangleStdLib && originalFuncName !== 'main') { // For other user-defined functions in exec target, use _prog_funcName
+        } else if (this.mangleStdLib && originalFuncName !== 'main') {
             funcNameInIR = `_prog_${originalFuncName}`;
         }
 
         // Handle class method mangling
-        if (this.currentScope !== this.globalScope && decl.visibility && decl.visibility.lexeme) { // Check if it's a class method
+        // For declaration phase, 'this' context might not be fully established,
+        // but we assume mangling is consistent.
+        if (decl.visibility && decl.visibility.lexeme) { // Check if it's a class method (heuristic)
+            // This part is complex because decl.visibility alone is not enough to know it's a method.
+            // For now, let's assume methods are handled by their class declaration in emitGlobalDefinitions.
+            // If this is a local function definition, funcNameInIR should be unique per scope.
+            // But we are only defining global symbols here.
+        }
+        const mangledName = `@${funcNameInIR}`;
+
+        // Determine LLVM return type
+        let llvmReturnType = this.llvmHelper.getLLVMType(decl.returnType);
+        let isSretReturn = false;
+        if (llvmReturnType.startsWith('%struct.') && !llvmReturnType.endsWith('*')) {
+            isSretReturn = true;
+            llvmReturnType = 'void'; // Effective return type for SRET
+        }
+
+        // Determine parameter types for signature
+        let signatureParamTypesOnly: string[] = [];
+
+        // Add 'this' parameter for class methods (if applicable, based on decl context)
+        // This is tricky in the first pass as full scope context is not established.
+        // For now, assume a method's signature is inferred from its declaration in ClassDeclaration.
+        // During emitFunctionDefinition, we'll confirm 'this' is present.
+        
+        // Add SRET parameter if needed
+        if (isSretReturn) {
+            signatureParamTypesOnly.push(`${this.llvmHelper.getLLVMType(decl.returnType)}*`); // SRET pointer type
+        }
+
+        // Add user-defined parameters
+        decl.parameters.forEach(p => {
+            let paramType = this.llvmHelper.getLLVMType(p.type);
+            if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+                paramType = `${paramType}*`;
+            }
+            signatureParamTypesOnly.push(paramType);
+        });
+
+        const funcType = `${llvmReturnType} (${signatureParamTypesOnly.join(', ')})*`; // Full function pointer type
+
+        this.globalScope.define(originalFuncName, { llvmType: funcType, ptr: mangledName, isPointer: true, definedInScopeDepth: this.globalScope.depth });
+        if (this.debug) console.log("Declared symbol:", originalFuncName, "mangled:", mangledName, "type:", funcType);
+    }
+
+    public emitFunctionDefinition(decl: FunctionDeclaration): void {
+        this.currentFunction = decl;
+        const originalFuncName = decl.name.lexeme;
+        let funcNameInIR = originalFuncName;
+
+        if (this.debug) console.log("Emitting definition for function:", originalFuncName);
+
+        // Re-determine mangled name (must be consistent with declareFunctionSymbol)
+        if (decl.isExported) {
+            const relativeSourcePath = path.relative(process.cwd(), this.sourceFilePath);
+            const moduleNamePart = relativeSourcePath.replace(/\.yu$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
+            funcNameInIR = `_mod_${moduleNamePart}_${originalFuncName}`;
+        } else if (this.mangleStdLib && originalFuncName !== 'main') {
+            funcNameInIR = `_prog_${originalFuncName}`;
+        }
+
+        // Handle class method mangling
+        const isClassMethod = (this.currentScope !== this.globalScope && decl.visibility && decl.visibility.lexeme);
+        if (isClassMethod) {
             const thisEntry = this.currentScope.find("this");
             if (thisEntry && thisEntry.llvmType.startsWith('%struct.')) {
                 const classNameMatch = thisEntry.llvmType.match(/%struct\.([a-zA-Z0-9_]+)\*/);
@@ -1113,95 +1764,83 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const mangledName = `@${funcNameInIR}`;
 
         const linkage = (originalFuncName === 'main' || decl.isExported) ? '' : 'internal ';
-        let llvmReturnType = this.llvmHelper.getLLVMType(decl.returnType); // Initial LLVM return type
-
+        
+        let llvmReturnType = this.llvmHelper.getLLVMType(decl.returnType);
         let isSretReturn = false;
-        let sretPtrType: string | null = null;
-        let sretArgName: string | null = null;
-        this.sretPointer = null; // Reset for current function
-
-        let signatureParamsList: string[] = []; // Parameters as they appear in the LLVM define signature
-        let signatureParamTypesOnly: string[] = []; // Types for the funcType signature
-
-        // Handle SRET (Structure Return) convention for struct returns
         if (llvmReturnType.startsWith('%struct.') && !llvmReturnType.endsWith('*')) {
             isSretReturn = true;
-            sretPtrType = `${llvmReturnType}*`;
-            sretArgName = `%agg.result`;
-            signatureParamsList.push(`ptr sret(${llvmReturnType}) align ${this.llvmHelper.getAlign(llvmReturnType)} ${sretArgName}`); // Correct sret syntax
-            signatureParamTypesOnly.push(sretPtrType); // Add sret parameter type to type list
-            this.sretPointer = sretArgName; // Store for return statement
-            llvmReturnType = 'void'; // Function now returns void
+            llvmReturnType = 'void';
         }
 
-        // Prepend 'this' parameter for class methods if applicable
-        const hasImplicitThis = (this.currentScope !== this.globalScope && this.currentScope.find("this"));
+        let signatureParamsList: string[] = [];
+        let sretArgName: string | null = null;
+        this.sretPointer = null;
+
+        if (isSretReturn) {
+            sretArgName = `%agg.result`;
+            signatureParamsList.push(`ptr sret(${this.llvmHelper.getLLVMType(decl.returnType)}) align ${this.llvmHelper.getAlign(this.llvmHelper.getLLVMType(decl.returnType))} ${sretArgName}`);
+            this.sretPointer = sretArgName;
+        }
+
+        const hasImplicitThis = isClassMethod; // If it's a class method, it has 'this'
         if (hasImplicitThis) {
-            const thisEntry = this.currentScope.find("this");
-            if (thisEntry) {
-                signatureParamsList.push(`${thisEntry.llvmType} %this`); // Implicit 'this' parameter in signature
-                signatureParamTypesOnly.push(thisEntry.llvmType);
+            // Re-use info from define, assume it exists correctly from class setup
+            const classEntry = this.classDefinitions.get(this.currentScope.find("this")?.llvmType.slice(8, -1) || '');
+            if (classEntry) {
+                signatureParamsList.push(`${classEntry.llvmType}* %this`);
+            } else {
+                signatureParamsList.push(`i8* %this`); // Fallback if class not found
             }
         }
 
-        // Add user-defined parameters to the signature
         decl.parameters.forEach(p => {
-            const paramType = this.llvmHelper.getLLVMType(p.type);
+            let paramType = this.llvmHelper.getLLVMType(p.type);
+            if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+                paramType = `${paramType}*`;
+            }
             signatureParamsList.push(`${paramType} %${p.name.lexeme}`);
-            signatureParamTypesOnly.push(paramType);
         });
 
         const paramsString = signatureParamsList.join(', ');
         
-        const funcType = `${llvmReturnType} (${signatureParamTypesOnly.join(', ')})*`; // Use modified return type and signature types
-
-        this.globalScope.define(originalFuncName, { llvmType: funcType, ptr: mangledName, isPointer: true }); // Use originalFuncName for lookup
-
-        this.emit(`define ${linkage}${llvmReturnType} ${mangledName}(${paramsString}) {`, false); // Use modified return type and paramsString
+        this.emit(`define ${linkage}${llvmReturnType} ${mangledName}(${paramsString}) {`, false);
         this.indentLevel++;
-
         this.emit('entry:', false);
         this.enterScope();
 
-        // Register the sret pointer in the current scope if applicable
-        if (isSretReturn && sretArgName && sretPtrType) {
+        if (isSretReturn && sretArgName) {
             this.currentScope.define(sretArgName, {
-                llvmType: sretPtrType, // Store the pointer type for SRET arg in symbol table.
+                llvmType: `${this.llvmHelper.getLLVMType(decl.returnType)}*`,
                 ptr: sretArgName,
-                isPointer: true
+                isPointer: true,
+                definedInScopeDepth: this.currentScope.depth
             });
         }
 
-        // --- Store incoming arguments into allocated local variables ---
-        let currentLlvmArgIndex = 0; // LLVM arguments start from %0
-
-        // Account for SRET argument in numbering
-        if (isSretReturn) {
-            // SRET parameter (%agg.result) is at index 0 in LLVM IR argument list. It is handled by its explicit name.
-            // We use named arguments for everything else so we don't need to track index here.
-        }
-        
-        // Account for 'this' argument
         if (hasImplicitThis) {
-            const thisEntry = this.currentScope.find("this");
-            if (thisEntry && this.currentFunction) {
-                const thisPtr = `%this.ptr`; // Alloca for 'this'
-                this.emit(`${thisPtr} = alloca ${thisEntry.llvmType}, align ${this.llvmHelper.getAlign(thisEntry.llvmType)}`);
-                this.emit(`store ${thisEntry.llvmType} %this, ${thisEntry.llvmType}* ${thisPtr}, align ${this.llvmHelper.getAlign(thisEntry.llvmType)}`);
-                this.currentScope.define("this", { // Overwrite the 'this' in class scope with the alloca'd one for this function
-                    llvmType: thisEntry.llvmType,
+            const thisEntry = this.currentScope.find("this"); // From outer class scope
+            if (thisEntry) {
+                const thisPtr = `%this.ptr`;
+                const thisLlvmType = thisEntry.llvmType; // This will be %struct.MyClass*
+                this.emit(`${thisPtr} = alloca ${thisLlvmType}, align ${this.llvmHelper.getAlign(thisLlvmType)}`);
+                this.emit(`store ${thisLlvmType} %this, ${thisLlvmType}* ${thisPtr}, align ${this.llvmHelper.getAlign(thisLlvmType)}`);
+                this.currentScope.define("this", { // Overwrite with alloca'd ptr
+                    llvmType: thisLlvmType,
                     ptr: thisPtr,
-                    isPointer: true
+                    isPointer: true,
+                    definedInScopeDepth: this.currentScope.depth
                 });
             }
         }
 
-        // Now process actual declared parameters, storing them into fresh allocas
         decl.parameters.forEach(p => {
+            let paramType = this.llvmHelper.getLLVMType(p.type);
+            if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+                paramType = `${paramType}*`;
+            }
             const paramName = p.name.lexeme;
-            const paramType = this.llvmHelper.getLLVMType(p.type);
-            const paramPtr = `%p.${paramName}`; // The alloca'd local variable for this parameter
-            const incomingArgName = `%${paramName}`; // Use the named parameter from the signature
+            const paramPtr = `%p.${paramName}`;
+            const incomingArgName = `%${paramName}`;
             
             this.emit(`${paramPtr} = alloca ${paramType}, align ${this.llvmHelper.getAlign(paramType)}`);
             this.emit(`store ${paramType} ${incomingArgName}, ${paramType}* ${paramPtr}, align ${this.llvmHelper.getAlign(paramType)}`);
@@ -1209,16 +1848,16 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             this.currentScope.define(paramName, {
                 llvmType: paramType,
                 ptr: paramPtr,
-                isPointer: paramType.endsWith('*')
+                isPointer: paramType.endsWith('*'),
+                definedInScopeDepth: this.currentScope.depth
             });
         });
-
 
         decl.body.accept(this);
         
         const lastLine = this.builder[this.builder.length - 1];
         if (lastLine !== undefined && !lastLine.trim().startsWith('ret ') && !lastLine.trim().startsWith('br ')) {
-             if (llvmReturnType === 'void') { // Use the effective return type for this check
+             if (llvmReturnType === 'void') {
                 this.emit(`ret void`);
             } else {
                 this.emit(`unreachable`);
@@ -1230,7 +1869,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.emit('}', false);
         this.emit('', false);
         this.currentFunction = null;
-        this.sretPointer = null; // Reset sret pointer for next function
+        this.sretPointer = null;
     }
 
     visitClassDeclaration(stmt: ClassDeclaration): void {
@@ -1269,7 +1908,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             methodScope.define("this", {
                 llvmType: `${structName}*`,
                 ptr: '%this',
-                isPointer: true
+                isPointer: true,
+                definedInScopeDepth: methodScope.depth
             });
             this.currentScope = methodScope;
             this.visitFunctionDeclaration(method);
@@ -1508,6 +2148,205 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
         return { value: '', type: 'void' };
     }
+
+    visitFunctionLiteralExpr(expr: FunctionLiteralExpr): IRValue {
+        const uniqueFunctionName = this.llvmHelper.getNewUniqueName('closure_func');
+        
+        // Step 1: Analyze for captured variables
+        // `this.currentScope` at this point is the scope *enclosing* the function literal.
+        // The function literal's body will create a new scope at `this.currentScope.depth + 1`.
+        const analyzer = new ClosureAnalyzer(this.currentScope, this.currentScope.depth + 1);
+        expr.body.accept(analyzer); // Analyze the body of the function literal
+        const capturedVariables = analyzer.getCapturedVariables();
+
+        // Step 2 & 3: Environment struct definition and LLVM function signature
+        let envStructType: string | null = null; // LLVM type of the environment struct (e.g., %struct.closure_env_func_X)
+        let envStructPtrType: string | null = null; // LLVM pointer type to the environment struct (e.g., %struct.closure_env_func_X*)
+        let envInstancePtr: string | null = null; // Pointer to the instance of the environment struct on heap
+
+        // Define the environment struct if there are captured variables
+        if (capturedVariables.length > 0) {
+            envStructType = `%struct.closure_env_${uniqueFunctionName}`;
+            const envFields = capturedVariables.map(cv => `${cv.llvmType}*`); // Environment stores pointers to captured vars
+            this.emitHoisted(`${envStructType} = type { ${envFields.join(', ')} }`);
+            envStructPtrType = `${envStructType}*`;
+        }
+
+        // Determine the actual LLVM function's *internal* signature (with env_ptr as first arg)
+        const originalParamLlvmTypes = expr.parameters.map(p => {
+            let type = this.llvmHelper.getLLVMType(p.type);
+            // Apply reference passing for user-defined structs as function parameters
+            if (type.startsWith('%struct.') && type !== LangItems.string.structName) {
+                type = `${type}*`;
+            }
+            return type;
+        });
+
+        // Always include an env pointer (i8*) as first param for uniform closure calling.
+        let closureFuncLlvmParams: string[] = ['i8*'];
+        closureFuncLlvmParams.push(...originalParamLlvmTypes);
+
+        const returnLlvmType = this.llvmHelper.getLLVMType(expr.returnType);
+        
+        // Final function type for the actual LLVM function (used in 'define')
+        const actualLlvmFuncSignature = `${returnLlvmType} (${closureFuncLlvmParams.join(', ')})`;
+        const closureFuncName = `@${uniqueFunctionName}`;
+
+        // --- Store current state to restore after generating inner function ---
+        const savedCurrentFunction = this.currentFunction;
+        const savedCurrentScope = this.currentScope;
+        const savedSretPointer = this.sretPointer;
+        // --- END save state ---
+
+        // Step 4: Emit the actual LLVM function definition (now) into a hoisted buffer
+        const savedBuilder = this.builder;
+        const savedIndent = this.indentLevel;
+        this.builder = [];
+        this.indentLevel = 0;
+
+        // Temporarily set up context for generating the inner function
+        this.currentFunction = new FunctionDeclaration(
+            new Token(TokenType.IDENTIFIER, uniqueFunctionName, uniqueFunctionName, 0, 0),
+            expr.parameters,
+            expr.returnType,
+            expr.body,
+            false, // Not exported
+            new Token(TokenType.PRIVATE, 'private', 'private', 0, 0), // Private linkage
+            capturedVariables // Pass captured variables here
+        );
+
+        this.sretPointer = null; // Reset sret for this closure func
+        
+        // Create the new scope for the closure's body
+        this.emit(`define internal ${returnLlvmType} ${closureFuncName}(${closureFuncLlvmParams.map((t,i) => `${t} %arg${i}`).join(', ')}) {`, false);
+        this.indentLevel++;
+        this.emit('entry:', false);
+        this.enterScope(); // New scope for closure's parameters and body locals
+
+        // Store environment pointer if it exists
+        let envParamName: string | null = null;
+        if (envStructPtrType) {
+            envParamName = '%arg0'; // The first parameter is the (generic) environment pointer (i8*)
+            const castedEnv = this.llvmHelper.getNewTempVar();
+            this.emit(`${castedEnv} = bitcast i8* ${envParamName} to ${envStructPtrType}`);
+            // Define it in the current scope for lookup, so visitIdentifierExpr can find it
+            this.currentScope.define('__env_ptr', {
+                llvmType: envStructPtrType,
+                ptr: castedEnv,
+                isPointer: true,
+                definedInScopeDepth: this.currentScope.depth
+            });
+        } else {
+            // Even without captured variables, we still have an env parameter (can be null)
+            envParamName = '%arg0';
+        }
+        
+        // Store incoming parameters into allocas in the closure's new scope
+        let argIdxOffset = envStructPtrType ? 1 : 0;
+        expr.parameters.forEach((p, index) => {
+            const paramName = p.name.lexeme;
+            let paramType = this.llvmHelper.getLLVMType(p.type);
+            // Apply reference passing for user-defined structs
+            if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+                paramType = `${paramType}*`;
+            }
+
+            const paramAlloca = `%p.${paramName}`;
+            const incomingArgName = `%arg${index + argIdxOffset}`;
+            
+            this.emit(`${paramAlloca} = alloca ${paramType}, align ${this.llvmHelper.getAlign(paramType)}`);
+            this.emit(`store ${paramType} ${incomingArgName}, ${paramType}* ${paramAlloca}, align ${this.llvmHelper.getAlign(paramType)}`);
+            
+            this.currentScope.define(paramName, {
+                llvmType: paramType,
+                ptr: paramAlloca,
+                isPointer: paramType.endsWith('*'),
+                definedInScopeDepth: this.currentScope.depth
+            });
+        });
+
+        // --- Core logic to handle captured variables within the closure's body ---
+        // This is handled by modifying visitIdentifierExpr to check '__env_ptr' if a variable is captured.
+
+        // Emit the body of the function literal
+        expr.body.accept(this);
+        
+        // Ensure function always returns (even void functions need `ret void`)
+        const lastLine = this.builder[this.builder.length - 1];
+        if (lastLine !== undefined && !lastLine.trim().startsWith('ret ') && !lastLine.trim().startsWith('br ')) {
+             if (returnLlvmType === 'void') {
+                this.emit(`ret void`);
+            } else {
+                this.emit(`unreachable`); // Should be caught by semantic analysis usually
+            }
+        }
+
+        this.exitScope(); // Exit closure's body scope
+        this.indentLevel--;
+        this.emit('}', false); // End of actual LLVM function definition
+        this.emit('', false);
+
+        // Capture and hoist the generated function definition, then restore state
+        this.hoistFunctionDefinition(this.builder);
+        this.builder = savedBuilder;
+        this.indentLevel = savedIndent;
+        this.currentFunction = savedCurrentFunction;
+        this.currentScope = savedCurrentScope;
+        this.sretPointer = savedSretPointer;
+        // --- END restore state ---
+
+        // Step 5: Construct the closure object (function pointer + environment pointer)
+        // This `FunctionLiteralExpr` itself becomes an expression that evaluates to a closure object.
+        
+        // Allocate the environment struct on the heap and store captured variables
+        if (capturedVariables.length > 0) {
+            // Calculate size of environment struct
+            const totalEnvSize = capturedVariables.reduce((sum, cv) => sum + this.llvmHelper.sizeOf(cv.llvmType + '*'), 0);
+            
+            const envRawPtr = this.llvmHelper.getNewTempVar();
+            envInstancePtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${envRawPtr} = call i8* @yulang_malloc(i64 ${totalEnvSize})`); // Allocate environment on heap
+            this.emit(`${envInstancePtr} = bitcast i8* ${envRawPtr} to ${envStructPtrType}`); // Cast to typed pointer
+
+            capturedVariables.forEach((cv, index) => {
+                // Get the address of the captured variable (which is cv.ptr)
+                // Store this address (pointer to the variable) into the environment struct's field
+                const envFieldPtr = this.llvmHelper.getNewTempVar();
+                const cvPtrType = `${cv.llvmType}*`; // Type of the pointer to the captured variable
+                this.emit(`${envFieldPtr} = getelementptr inbounds ${envStructType}, ${envStructPtrType} ${envInstancePtr}, i32 0, i32 ${index}`);
+                this.emit(`store ${cvPtrType} ${cv.ptr}, ${cvPtrType}* ${envFieldPtr}, align 8`);
+            });
+        } else {
+            envInstancePtr = 'null';
+        }
+
+        // Create the closure object on the stack (a struct of { func_ptr, env_ptr })
+        // The type of this closure object is `{ actualFuncType*, envStructType }` or just `actualFuncType*` if no capture
+        
+        // Always build a closure object { func_ptr, i8* env_ptr }
+        const closureObjLlvmType = `{ ${actualLlvmFuncSignature}*, i8* }`;
+        const closureObjPtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${closureObjPtr} = alloca ${closureObjLlvmType}, align 8`);
+
+        // Store function pointer
+        const funcPtrField = this.llvmHelper.getNewTempVar();
+        this.emit(`${funcPtrField} = getelementptr inbounds ${closureObjLlvmType}, ${closureObjLlvmType}* ${closureObjPtr}, i32 0, i32 0`);
+        this.emit(`store ${actualLlvmFuncSignature}* ${closureFuncName}, ${actualLlvmFuncSignature}** ${funcPtrField}, align 8`);
+
+        // Store environment pointer (bitcast to i8*)
+        const envPtrField = this.llvmHelper.getNewTempVar();
+        this.emit(`${envPtrField} = getelementptr inbounds ${closureObjLlvmType}, ${closureObjLlvmType}* ${closureObjPtr}, i32 0, i32 1`);
+        const envAsI8 = this.llvmHelper.getNewTempVar();
+        const envSource = envStructPtrType ? `${envStructPtrType} ${envInstancePtr}` : `i8* ${envInstancePtr}`;
+        if (envStructPtrType && envInstancePtr !== 'null') {
+            this.emit(`${envAsI8} = bitcast ${envSource} to i8*`);
+            this.emit(`store i8* ${envAsI8}, i8** ${envPtrField}, align 8`);
+        } else {
+            this.emit(`store i8* ${envInstancePtr}, i8** ${envPtrField}, align 8`);
+        }
+
+        return { value: closureObjPtr, type: `${closureObjLlvmType}*` };
+    }
     visitThisExpr(expr: ThisExpr): IRValue {
         // 'this' refers to the current instance (self pointer)
         // In class methods, 'this' is typically the first implicit parameter.
@@ -1527,9 +2366,17 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         const isSrcPtr = value.type.endsWith('*');
         const isDstPtr = targetLlvmType.endsWith('*');
+        const dstIsIntCast = targetLlvmType.startsWith('i') && !isDstPtr;
+        const dstIsFloatCast = targetLlvmType.startsWith('f');
 
         // New case: Dereferencing a pointer from `objof` to a value.
         // e.g., (objof(addr) as int) -> value from `i8*` to `i32`
+        if (isSrcPtr && dstIsIntCast) {
+            const resultVar = this.llvmHelper.getNewTempVar();
+            this.emit(`${resultVar} = ptrtoint ${value.type} ${value.value} to ${targetLlvmType}`);
+            return { value: resultVar, type: targetLlvmType };
+        }
+
         if (isSrcPtr && !isDstPtr) {
             const targetPtrType = targetLlvmType + "*";
 
@@ -1666,7 +2513,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.globalScope.define(moduleLookupName, {
             llvmType: `${moduleInfo.structName}*`,
             ptr: moduleInfo.globalName,
-            isPointer: true
+            isPointer: true,
+            definedInScopeDepth: this.globalScope.depth
         });
     }
 
@@ -1686,7 +2534,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const funcType = `${returnType} (${paramsList.join(', ')})`;
 
         // For declared functions, we assume they are function pointers.
-        this.globalScope.define(originalFuncName, { llvmType: `${funcType}*`, ptr: mangledName, isPointer: true });
+        this.globalScope.define(originalFuncName, { llvmType: `${funcType}*`, ptr: mangledName, isPointer: true, definedInScopeDepth: this.globalScope.depth });
 
         this.emit(`declare ${returnType} ${mangledName}(${paramsString})`, false);
     }

@@ -2,8 +2,8 @@
 
 import { Token, TokenType } from '../token.js';
 import {
-    Stmt, ExpressionStmt, IfStmt, WhileStmt, ReturnStmt, BlockStmt,
-    Expr, LiteralExpr // Added LiteralExpr
+    Stmt, ExpressionStmt, IfStmt, WhileStmt, ReturnStmt, BlockStmt, LetStmt,
+    Expr, LiteralExpr, FunctionLiteralExpr, FunctionTypeAnnotation, TypeAnnotation, BasicTypeAnnotation // Added new AST imports
 } from '../ast.js';
 import { Parser } from './index.js'; // Import Parser from the main parser file
 
@@ -20,6 +20,20 @@ export class StatementParser {
         if (this.parser.match(TokenType.FOR)) return this.forStatement(); // NEW: Handle for loop
         if (this.parser.match(TokenType.RETURN)) return this.returnStatement();
         if (this.parser.match(TokenType.LBRACE)) return this.block();
+        if (this.parser.match(TokenType.FUN)) { // Handle local function declarations (desugar into let name = fun(...) { ... };)
+            const funcDecl = this.parser.declarationParser.functionDeclaration("function", false); // Parse as FunctionDeclaration
+            
+            // Create a FunctionLiteralExpr from the parsed FunctionDeclaration parts
+            const funcLiteral = new FunctionLiteralExpr(funcDecl.parameters, funcDecl.returnType, funcDecl.body);
+
+            // Create a FunctionTypeAnnotation for the 'let' statement's type
+            const paramTypesForFuncType = funcDecl.parameters.map(p => p.type || null);
+            const returnTypeForFuncType = funcDecl.returnType || null;
+            const funcTypeAnnotation = new FunctionTypeAnnotation(paramTypesForFuncType as TypeAnnotation[], returnTypeForFuncType as TypeAnnotation);
+
+            // Return a LetStmt that defines the function name as a variable holding the function literal (closure)
+            return new LetStmt(funcDecl.name, funcTypeAnnotation, funcLiteral, false); // Local functions are not exported
+        }
         
         return this.expressionStatement();
     }

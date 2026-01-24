@@ -1,0 +1,7 @@
+#import "std/io" as io;
+
+fun main(): i32 {
+  io.output("hello\n");
+  return 0;
+}
+

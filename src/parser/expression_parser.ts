@@ -1,6 +1,11 @@
 import { Token, TokenType } from '../token.js';
 import {
-    Expr, BinaryExpr, UnaryExpr, LiteralExpr, GroupingExpr, IdentifierExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr
+    Expr, BinaryExpr, UnaryExpr, LiteralExpr, GroupingExpr, IdentifierExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, 
+    AddressOfExpr,
+    DereferenceExpr, 
+    TypeAnnotation,
+    FunctionLiteralExpr,
+    Parameter
 } from '../ast.js';
 import { Parser } from './index.js'; // Import Parser to use it as a type
 
@@ -22,7 +27,7 @@ export class ExpressionParser {
             const equals = this.parser.previous();
             const value = this.assignment();
 
-            if (expr instanceof IdentifierExpr || expr instanceof GetExpr) { // Now GetExpr is a valid target
+            if (expr instanceof IdentifierExpr || expr instanceof GetExpr || expr instanceof DereferenceExpr) { // Now DereferenceExpr is a valid target
                 return new AssignExpr(expr, value); // expr is now the target
             }
             
@@ -109,11 +114,17 @@ export class ExpressionParser {
         return expr;
     }
 
-    // unary          → ( "!" | "-" | "delete" ) unary | call ;
+    // unary          → ( "!" | "-" | "delete" | "&" | "*" ) unary | call ;
     private unary(): Expr {
-        if (this.parser.match(TokenType.BANG, TokenType.MINUS)) {
+        if (this.parser.match(TokenType.BANG, TokenType.MINUS, TokenType.AMPERSAND, TokenType.STAR)) {
             const operator = this.parser.previous();
             const right = this.unary();
+            if (operator.type === TokenType.AMPERSAND) {
+                return new AddressOfExpr(right);
+            }
+            if (operator.type === TokenType.STAR) {
+                return new DereferenceExpr(right);
+            }
             return new UnaryExpr(operator, right);
         }
 
@@ -217,6 +228,38 @@ export class ExpressionParser {
             }
             this.parser.consume(TokenType.RBRACE, "Expect '}' after object literal.");
             return new ObjectLiteralExpr(properties);
+        }
+
+        if (this.parser.match(TokenType.FUN)) { // NEW: Handle function literals
+            // Parse parameters
+            this.parser.consume(TokenType.LPAREN, "Expect '(' after 'fun'.");
+            const parameters: Parameter[] = [];
+            if (!this.parser.check(TokenType.RPAREN)) {
+                do {
+                    if (parameters.length >= 255) {
+                        this.parser.error(this.parser.peek(), "Cannot have more than 255 parameters.");
+                    }
+                    const paramName = this.parser.consume(TokenType.IDENTIFIER, "Expect parameter name.");
+                    let paramType: TypeAnnotation | null = null;
+                    if (this.parser.match(TokenType.COLON)) {
+                        paramType = this.parser.typeAnnotation();
+                    }
+                    parameters.push(new Parameter(paramName, paramType));
+                } while (this.parser.match(TokenType.COMMA));
+            }
+            this.parser.consume(TokenType.RPAREN, "Expect ')' after parameters.");
+
+            // Parse return type
+            let returnType: TypeAnnotation | null = null;
+            if (this.parser.match(TokenType.COLON)) {
+                returnType = this.parser.typeAnnotation();
+            }
+
+            // Parse body
+            this.parser.consume(TokenType.LBRACE, "Expect '{' before function body.");
+            const body = this.parser.block(); // block() returns a BlockStmt
+
+            return new FunctionLiteralExpr(parameters, returnType, body);
         }
         
         throw this.parser.error(this.parser.peek(), "Expect expression.");

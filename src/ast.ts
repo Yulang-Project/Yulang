@@ -15,6 +15,9 @@ export interface ExprVisitor<R> {
     visitObjectLiteralExpr(expr: ObjectLiteralExpr): R; // NEW
     visitNewExpr(expr: NewExpr): R; // NEW
     visitDeleteExpr(expr: DeleteExpr): R; // NEW
+    visitAddressOfExpr(expr: AddressOfExpr): R;
+    visitDereferenceExpr(expr: DereferenceExpr): R;
+    visitFunctionLiteralExpr(expr: FunctionLiteralExpr): R;
 }
 
 export interface StmtVisitor<R> {
@@ -59,6 +62,16 @@ export class BinaryExpr extends Expr {
 export class UnaryExpr extends Expr {
     constructor(public operator: Token, public right: Expr) { super(); }
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitUnaryExpr(this); }
+}
+
+export class AddressOfExpr extends Expr {
+    constructor(public expression: Expr) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitAddressOfExpr(this); }
+}
+
+export class DereferenceExpr extends Expr {
+    constructor(public expression: Expr) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitDereferenceExpr(this); }
 }
 
 export class IdentifierExpr extends Expr {
@@ -115,6 +128,15 @@ export class DeleteExpr extends Expr {
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitDeleteExpr(this); }
 }
 
+export class FunctionLiteralExpr extends Expr {
+    constructor(
+        public parameters: Parameter[],
+        public returnType: TypeAnnotation | null,
+        public body: BlockStmt
+    ) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitFunctionLiteralExpr(this); }
+}
+
 // --- Statements ---
 export abstract class Stmt extends ASTNode {
     abstract accept<R>(visitor: StmtVisitor<R>): R;
@@ -139,6 +161,8 @@ export abstract class TypeAnnotation extends ASTNode {
 export interface TypeAnnotationVisitor<R> {
     visitBasicTypeAnnotation(type: BasicTypeAnnotation): R;
     visitArrayTypeAnnotation(type: ArrayTypeAnnotation): R; // NEW
+    visitPointerTypeAnnotation(type: PointerTypeAnnotation): R;
+    visitFunctionTypeAnnotation(type: FunctionTypeAnnotation): R;
 }
 
 export class BasicTypeAnnotation extends TypeAnnotation {
@@ -154,6 +178,15 @@ export class ArrayTypeAnnotation extends TypeAnnotation {
     }
 }
 
+export class PointerTypeAnnotation extends TypeAnnotation {
+    constructor(public baseType: TypeAnnotation) { super(); }
+    accept<R>(visitor: TypeAnnotationVisitor<R>): R { return visitor.visitPointerTypeAnnotation(this); }
+}
+
+export class FunctionTypeAnnotation extends TypeAnnotation {
+    constructor(public parameters: TypeAnnotation[], public returnType: TypeAnnotation) { super(); }
+    accept<R>(visitor: TypeAnnotationVisitor<R>): R { return visitor.visitFunctionTypeAnnotation(this); }
+}
 export class LetStmt extends Stmt {
     constructor(public name: Token, public type: TypeAnnotation | null, public initializer: Expr | null, public isExported: boolean = false) { super(); }
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitLetStmt(this); }
@@ -191,7 +224,8 @@ export class FunctionDeclaration extends Stmt {
         public returnType: TypeAnnotation | null,
         public body: BlockStmt,
         public isExported: boolean = false,
-        public visibility: Token // Add visibility field
+        public visibility: Token, // Add visibility field
+        public capturedVariables: any[] | null = null
     ) { super(); }
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitFunctionDeclaration(this); }
 }
@@ -293,6 +327,23 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
         return this.parenthesize("delete", expr.target);
     }
 
+    visitAddressOfExpr(expr: AddressOfExpr): string {
+        return this.parenthesize("addrof", expr.expression);
+    }
+
+    visitDereferenceExpr(expr: DereferenceExpr): string {
+        return this.parenthesize("deref", expr.expression);
+    }
+
+    visitFunctionLiteralExpr(expr: FunctionLiteralExpr): string {
+        const params = expr.parameters.map(p => {
+            const typeStr = p.type ? `: ${this.printType(p.type)}` : '';
+            return `${p.name.lexeme}${typeStr}`;
+        }).join(" ");
+        const returnType = expr.returnType ? `: ${this.printType(expr.returnType)}` : '';
+        return this.parenthesize(`fun literal(${params})${returnType}`, expr.body);
+    }
+
     visitExpressionStmt(stmt: ExpressionStmt): string { return this.parenthesize("expr", stmt.expression); }
     visitLetStmt(stmt: LetStmt): string {
         const typeStr = stmt.type ? `: ${this.printType(stmt.type)}` : '';
@@ -359,6 +410,16 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
     }
     visitArrayTypeAnnotation(type: ArrayTypeAnnotation): string { // NEW
         return `array(${type.elementType.accept(this)})`;
+    }
+
+    visitPointerTypeAnnotation(type: PointerTypeAnnotation): string {
+        return `pointer(${type.baseType.accept(this)})`;
+    }
+
+    visitFunctionTypeAnnotation(type: FunctionTypeAnnotation): string {
+        const params = type.parameters.map(p => this.printType(p)).join(", ");
+        const returnType = this.printType(type.returnType);
+        return `fun(${params})(${returnType})`;
     }
 
     printType(type: TypeAnnotation): string {

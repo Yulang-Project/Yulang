@@ -12,7 +12,6 @@ export const LangItems = {
         members: { // Re-add members for internal compiler use
             ptr: { index: 0, type: 'i8*' },
             len: { index: 1, type: 'i64' },
-            cap: { index: 2, type: 'i64' },
         }
     },
     builtin_alloc: { // New lang item for _builtin_alloc
@@ -22,16 +21,6 @@ export const LangItems = {
     string_add: {
         symbolName: '__string_add', // The function name in std.yu for the '+' operator on strings
         module: 'std',
-    },
-    output: { // New lang item for output function
-        symbolName: 'output',
-        module: 'std',
-        mangledName: '_std_output' // The LLVM function name
-    },
-    input: { // New lang item for input function
-        symbolName: 'input',
-        module: 'std',
-        mangledName: '_std_input' // The LLVM function name
     },
     object: {
         typeName: 'object',

@@ -1,7 +1,7 @@
 import { Token, TokenType } from '../token.js';
 import {
     Stmt, LetStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, DeclareFunction, ImportStmt, ConstStmt,
-    Parameter, TypeAnnotation, Expr, ExpressionStmt, LiteralExpr, AsExpr, ObjectLiteralExpr // Added AsExpr, ObjectLiteralExpr
+    Parameter, TypeAnnotation, Expr, ExpressionStmt, LiteralExpr, AsExpr, ObjectLiteralExpr, AddressOfExpr
 } from '../ast.js';
 import { Parser } from './index.js';
 import { TypeParser } from './type_parser.js';
@@ -86,6 +86,9 @@ export class DeclarationParser {
         let initializer: Expr | null = null;
         if (this.parser.match(TokenType.EQ)) {
             initializer = this.parser.expression();
+        } else if (this.parser.match(TokenType.ARROW)) { // Handle '->' for implicit address-of assignment
+            const targetExpr = this.parser.expression();
+            initializer = new AddressOfExpr(targetExpr);
         }
         // No semicolon consumption here
         return new LetStmt(name, type, initializer, isExported);

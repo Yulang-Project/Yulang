@@ -1,8 +1,4 @@
-// 简单 IO：直接用 syscall 读写
-
-// 简单 IO：直接用 syscall 读写
-
-class File {
+export class File {
   public fd: i64;
 
   public fun constructor(path: string, flags: i64, mode: i64): void {
@@ -31,9 +27,8 @@ class File {
     if (fd < 0) {
       return -1;
     }
-    let data_struct: i64 = addrof(content);
-    let data_ptr: i64 = (objof(data_struct)) as i64;
-    let data_len: i64 = (objof(data_struct + 8)) as i64;
+    let data_ptr: i64 = _builtin_string_to_ptr(content) as i64;
+    let data_len: i64 = _builtin_string_get_len(content);
     return syscall(1, fd, data_ptr, data_len);
   }
 
@@ -46,79 +41,20 @@ class File {
   }
 }
 
-fun output(msg: string) {
-  // `string` is now a value-struct on the stack.
-  // `addrof` gives us the address of this struct.
-  let struct_addr: i64 = addrof(msg);
-  
-  // Get data pointer (at offset 0)
-  let p: i64 = (objof(struct_addr)) as i64;
-  
-  // Get length (at offset 8)
-  let l: i64 = (objof(struct_addr + 8)) as i64;
-  
-  syscall(1, 1, p, l);
-}
-
-fun input(): string {
+export fun input(): string {
   let buf_size: i64 = 1024;
   let buf = _builtin_alloc(buf_size);
   let read_len: i64 = syscall(0, 0, buf, buf_size);
   return _builtin_create_string(buf, read_len);
 }
 
-// 读指定路径的文件（最多 max_len 字节）
-// 注意：path 需是以 '\0' 结尾的字符串（字面量符合这一点）
-fun read_file(path: string, max_len: i64): string {
-  let path_addr: i64 = (objof(addrof(path))) as i64; // 取字符串数据指针（字面量含 '\0'）
-  let fd: i64 = syscall(2, path_addr, 0, 0); // open(path, O_RDONLY)
-  if (fd < 0) {
-    return "";
-  }
-  let buf = _builtin_alloc(max_len);
-  let n: i64 = syscall(0, fd, buf, max_len); // read
-  syscall(3, fd, 0, 0); // close
-  if (n < 0) {
-    return "";
-  }
-  return _builtin_create_string(buf, n);
+export fun print(msg: string) {
+  let p: i64 = _builtin_string_to_ptr(msg) as i64;
+  let l: i64 = _builtin_string_get_len(msg);
+  syscall(1, 1, p, l);
 }
 
-// 写文件（覆盖写），path 需为 '\0' 结尾的字符串字面量
-fun write_file(path: string, content: string): i64 {
-  let path_addr: i64 = (objof(addrof(path))) as i64;
-  let data_struct: i64 = addrof(content);
-  let data_ptr: i64 = (objof(data_struct)) as i64;
-  let data_len: i64 = (objof(data_struct + 8)) as i64;
-
-  // O_WRONLY | O_CREAT | O_TRUNC = 1 | 64 | 512 = 577, mode 0644 = 420
-  let fd: i64 = syscall(2, path_addr, 577, 420);
-  if (fd < 0) {
-    return fd;
-  }
-  let written: i64 = syscall(1, fd, data_ptr, data_len); // write
-  syscall(3, fd, 0, 0); // close
-  return written;
+export fun println(msg: string) {
+  print(msg);
+  print("\n");
 }
-
-// --- File 封装 ---
-
-// 打开文件，返回 File 句柄；flags 默认 O_RDONLY，mode 默认 0644
-fun open(path: string, flags: i64, mode: i64): File {
-  return new File(path, flags, mode);
-}
-
-fun open_read(path: string): File {
-  // O_RDONLY = 0
-  return open(path, 0, 0);
-}
-
-fun open_write(path: string): File {
-  // O_WRONLY | O_CREAT | O_TRUNC = 1 | 64 | 512 = 577, mode 0644 = 420
-  return open(path, 577, 420);
-}
-
-// 兼容函数式 API（代理到方法）
-fun close(file: File) { file.close(); }
-fun read(file: File, max_len: i64): string { return file.read(max_len); }
-fun write(file: File, content: string): i64 { return file.write(content); }

@@ -11,8 +11,8 @@ fun filetest(): string {
   let rf: File = new io.File(path, 0, 0); // O_RDONLY
   let file_content: string = rf.read(1024);
   rf.close();
-  io.output("file content:\n");
-  io.output(file_content);
+  io.print("file content:\n");
+  io.print(file_content);
   return "OK";
 }
 
@@ -20,9 +20,9 @@ fun main(): int {
   let s = "hello world from value-type string!\n";
   let s1 = "hello world from reference-type string!\n";
   let s2: string = s + s1;
-  io.output(s2);
+  io.print(s2);
   let s3: string = io.input();
-  io.output(s3);
-  io.output("File test result: " + filetest());
+  io.print(s3);
+  io.println("File test result: " + filetest());
   return 0;
 }
