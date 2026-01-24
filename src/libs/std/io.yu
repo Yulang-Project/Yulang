@@ -3,8 +3,8 @@ export class File {
 
   public fun constructor(path: string, flags: i64, mode: i64): void {
     // 打开文件并填充 fd
-    let path_struct: i64 = addrof(path);
-    let path_addr: i64 = (objof(path_struct)) as i64; // 字符串数据指针
+    let path_ptr: pointer(char) = _builtin_string_to_ptr(path);
+    let path_addr: i64 = path_ptr as i64;
     let fd: i64 = syscall(2, path_addr, flags, mode);
     this.fd = fd;
   }

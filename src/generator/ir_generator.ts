@@ -1097,7 +1097,14 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         // Special-case syscall intrinsic
         if (calleeInfo.type === 'internal_syscall' || calleeInfo.value === '__syscall6') {
             // syscall(number[, arg1..arg6]) -> i64
-            const syscallArgs: string[] = argValues.map(a => this.ensureI64(a));
+            const syscallArgs: string[] = argValues.map(a => {
+                if (a.type.endsWith('*')) {
+                    const tempVar = this.llvmHelper.getNewTempVar();
+                    this.emit(`${tempVar} = ptrtoint ${a.type} ${a.value} to i64`);
+                    return tempVar;
+                }
+                return this.ensureI64(a);
+            });
             while (syscallArgs.length < 7) syscallArgs.push('0');
 
             const resultVar = this.llvmHelper.getNewTempVar();
