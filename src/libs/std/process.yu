@@ -39,3 +39,25 @@ export fun wait(pid: i64): i64 {
   // 这里简化处理，不提取具体的 status，只返回结束的 PID
   return syscall(61, pid, 0, 0, 0, 0, 0);
 }
+
+// 获取当前进程的工作目录
+export fun getcwd(): string {
+  let max_path: i64 = 4096; // Linux 默认最大路径长度
+  let buf = _builtin_alloc(max_path);
+  
+  // syscall 79: sys_getcwd(buf, size)
+  let len: i64 = syscall(79, buf as i64, max_path, 0, 0, 0, 0);
+  
+  if (len < 0) {
+    return "";
+  }
+  
+  return _builtin_create_string(buf, len - 1); // 减 1 去掉最后的 null 终止符
+}
+
+// 切换当前工作目录
+export fun chdir(path: string): i64 {
+  let path_ptr: i64 = _builtin_string_to_ptr(path) as i64;
+  // syscall 80: sys_chdir(path)
+  return syscall(80, path_ptr, 0, 0, 0, 0, 0);
+}

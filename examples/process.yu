@@ -1,5 +1,6 @@
 #import "std/process" as process;
 #import "std/io" as io;
+#import "std/time" as time;
 
 fun main(): i32 {
   io.println("Spawning a new process...");
@@ -8,6 +9,7 @@ fun main(): i32 {
   let p: i64 = process.fork(); 
 
   if (p > 0) {
+    time.sleep(1);
     // --- 父进程分支 ---
     io.print("Parent process: Child PID is ");
     io.println(toString(p));
@@ -37,6 +39,9 @@ fun main(): i32 {
   } else {
     io.println("Failed to spawn a new process.");
   }
-
+  io.println("当前工作目录" + process.getcwd());
+  io.println("正在切换工作目录");
+  process.chdir("/root");
+  io.println("切换后的工作目录" + process.getcwd());
   return 0;
 }
