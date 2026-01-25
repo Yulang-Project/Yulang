@@ -1,0 +1,42 @@
+#import "std/process" as process;
+#import "std/io" as io;
+
+fun main(): i32 {
+  io.println("Spawning a new process...");
+  
+  // 调用你库里的 fork()
+  let p: i64 = process.fork(); 
+
+  if (p > 0) {
+    // --- 父进程分支 ---
+    io.print("Parent process: Child PID is ");
+    io.println(toString(p));
+    
+    io.println("Parent process: Killing child process...");
+
+    // 注意：因为你的库函数定义是 kill(pid, sig)
+    // 所以这里必须传入信号编号 9 (SIGKILL)
+    // 如果你的语言支持方法调用，这里写 p.kill(9)
+    process.kill(p, 9); 
+    
+    // 良好的习惯：杀了孩子后要收尸
+    process.wait(p);
+    
+    io.println("Parent process: Child process killed and reaped.");
+  } else if (p == 0) {
+    // --- 子进程分支 ---
+    io.println("Child process: I am alive!");
+    
+    // 获取并打印自己的真实 PID 验证一下
+    let my_pid: i64 = process.getpid();
+    io.println("My actual PID is: " + toString(my_pid));
+
+    while (1 == 1) {
+      // 等待被杀
+    }
+  } else {
+    io.println("Failed to spawn a new process.");
+  }
+
+  return 0;
+}

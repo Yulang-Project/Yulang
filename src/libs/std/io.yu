@@ -54,6 +54,10 @@ export fun print(msg: string) {
   syscall(1, 1, p, l);
 }
 
+export fun output(msg: string) {
+  print(msg);
+}
+
 export fun println(msg: string) {
   print(msg);
   print("\n");

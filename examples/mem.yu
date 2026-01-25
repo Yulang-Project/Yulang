@@ -1,0 +1,20 @@
+#import "std/mem" as mem;
+#import "std/io" as io;
+
+fun main(): i32 {
+  let size: i64 = 4096; // 申请一页内存
+  let ptr: i64 = mem.alloc(size);
+
+  if (ptr < 0) {
+    io.println("Memory allocation failed!");
+    return 1;
+  }
+
+  io.print("Allocated 4096 bytes at address: ");
+  io.println(toString(ptr));
+  // 用完记得释放
+  mem.free(ptr, size);
+  io.println("Memory freed.");
+  
+  return 0;
+}
