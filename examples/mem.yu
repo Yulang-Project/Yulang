@@ -3,15 +3,16 @@
 
 fun main(): i32 {
   let size: i64 = 4096; // 申请一页内存
-  let ptr: i64 = mem.alloc(size);
+  let ptr: pointer(i64) = mem.alloc(size) as pointer(i64);
 
   if (ptr < 0) {
     io.println("Memory allocation failed!");
     return 1;
   }
+  *ptr = 1234567890;
 
   io.print("Allocated 4096 bytes at address: ");
-  io.println(toString(ptr));
+  io.println(toString(*ptr));
   // 用完记得释放
   mem.free(ptr, size);
   io.println("Memory freed.");

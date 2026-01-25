@@ -1,0 +1,18 @@
+#import "std/time" as time;
+#import "std/io" as io;
+
+fun main(): i32 {
+    io.println("开始倒计时 3 秒...");
+    
+    time.sleep(1);
+    io.println("2...");
+    
+    time.sleep(1);
+    io.println("1...");
+    
+    time.sleep(1);
+    io.println("发射！");
+    io.println("当前时间戳: " + toString(time.now()));
+    io.println("格林尼治时间: " time.gmt());
+    return 0;
+}

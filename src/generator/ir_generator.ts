@@ -184,6 +184,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private debug: boolean; // NEW: Debug flag
     private pass: 'declaration' | 'definition' = 'declaration'; // NEW: Compiler pass flag
     private objectLiteralCounter: number = 0;
+    private objectLiteralExpectedStructType: string | null = null; // Expected struct type for literal contexts
     private heapGlobalsEmitted: boolean = false;
     private lowLevelRuntimeEmitted: boolean = false;
     private moduleObjects: Map<string, { structName: string, globalName: string, members: Map<string, ModuleMember>, initialized: boolean }> = new Map();
@@ -1191,10 +1192,28 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             let argValue = arg.value;
             let argType = arg.type;
 
+            // If a string value is expected but we have a non-string scalar, auto-convert using builtin toString().
+            if (expectedParam === LangItems.string.structName && argType !== LangItems.string.structName && argType !== `${LangItems.string.structName}*`) {
+                const toStringBuiltin = findPredefinedFunction('toString');
+                if (toStringBuiltin) {
+                    const converted = toStringBuiltin.handler(this, [arg]) as IRValue;
+                    argValue = converted.value;
+                    argType = converted.type;
+                }
+            }
+
             // 如果参数数量不匹配，或者没有期望的参数类型，我们跳过隐式引用，但仍会尝试类型转换
             if (!expectedParam) {
                 callArgs.push(`${argType} ${argValue}`); // If no expected type, pass as-is after conversions
                 return;
+            }
+
+            // Struct pointer -> struct value when the callee expects a value.
+            if (expectedParam.startsWith('%struct.') && !expectedParam.endsWith('*') && argType === `${expectedParam}*`) {
+                const loadedStruct = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedStruct} = load ${expectedParam}, ${expectedParam}* ${argValue}, align ${this.llvmHelper.getAlign(expectedParam)}`);
+                argValue = loadedStruct;
+                argType = expectedParam;
             }
 
             // --- PARAMETER PASSING SEMANTICS & IMPLICIT REFERENCING ---
@@ -1488,24 +1507,31 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         let llvmType: string;
         let initValue: IRValue | null = null;
 
-        if (stmt.initializer) {
-            initValue = stmt.initializer.accept(this);
-        }
-
         if (stmt.type) { // 显式类型注解
             llvmType = this.llvmHelper.getLLVMType(stmt.type);
-        } else if (initValue) { // 从初始化器推断类型
-            // 字符串字面量推断为值类型 string（结构体）
-            if (initValue.type === `${LangItems.string.structName}*` && !initValue.type.endsWith(')*')) { // 排除函数指针
-                llvmType = LangItems.string.structName;
-            } else if (initValue.ptrType) {
-                // 地址推断为指针类型
-                llvmType = initValue.ptrType;
-            } else {
-                llvmType = initValue.type;
+            if (stmt.initializer) {
+                // Provide expected struct type to object literal lowering
+                this.objectLiteralExpectedStructType = (llvmType.startsWith('%struct.') && !llvmType.endsWith('*')) ? llvmType : null;
+                initValue = stmt.initializer.accept(this);
+                this.objectLiteralExpectedStructType = null;
             }
         } else {
-            throw new Error(`变量 '${varName}' 声明时必须指定类型或提供初始化器。`);
+            if (stmt.initializer) {
+                initValue = stmt.initializer.accept(this);
+            }
+            if (initValue) { // 从初始化器推断类型
+                // 字符串字面量推断为值类型 string（结构体）
+                if (initValue.type === `${LangItems.string.structName}*` && !initValue.type.endsWith(')*')) { // 排除函数指针
+                    llvmType = LangItems.string.structName;
+                } else if (initValue.ptrType) {
+                    // 地址推断为指针类型
+                    llvmType = initValue.ptrType;
+                } else {
+                    llvmType = initValue.type;
+                }
+            } else {
+                throw new Error(`变量 '${varName}' 声明时必须指定类型或提供初始化器。`);
+            }
         }
 
         if (this.debug) console.log(`Let ${varName} inferred LLVM type: ${llvmType}, initValue.type: ${initValue ? initValue.type : 'null'}`);
@@ -2444,6 +2470,42 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     visitObjectLiteralExpr(expr: ObjectLiteralExpr): IRValue {
+        // If there is an expected struct type (e.g., from `let a: Point = { ... }`), materialize that struct.
+        if (this.objectLiteralExpectedStructType) {
+            const structType = this.objectLiteralExpectedStructType;
+            const className = structType.startsWith('%struct.') ? structType.slice('%struct.'.length) : structType;
+            const classEntry = this.classDefinitions.get(className);
+            if (!classEntry) {
+                throw new Error(`Struct type '${structType}' not found for object literal.`);
+            }
+
+            // Zero-initialize the target struct, then fill provided fields.
+            const structPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${structPtr} = alloca ${structType}, align ${this.llvmHelper.getAlign(structType)}`);
+            this.emit(`store ${structType} zeroinitializer, ${structType}* ${structPtr}, align ${this.llvmHelper.getAlign(structType)}`);
+
+            for (const [keyToken, valueExpr] of expr.properties.entries()) {
+                const member = classEntry.members.get(keyToken.lexeme);
+                if (!member) {
+                    throw new Error(`Unknown field '${keyToken.lexeme}' in struct literal for ${structType}.`);
+                }
+                const value = valueExpr.accept(this) as IRValue;
+                let toStore = value;
+                if (value.type === `${member.llvmType}*` && member.llvmType.startsWith('%struct.') && !member.llvmType.endsWith('*')) {
+                    const loaded = this.llvmHelper.getNewTempVar();
+                    this.emit(`${loaded} = load ${member.llvmType}, ${member.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
+                    toStore = { value: loaded, type: member.llvmType };
+                } else if (value.type !== member.llvmType) {
+                    toStore = this.coerceValue(value, member.llvmType);
+                }
+                const fieldPtr = this.llvmHelper.getNewTempVar();
+                this.emit(`${fieldPtr} = getelementptr inbounds ${classEntry.llvmType}, ${classEntry.llvmType}* ${structPtr}, i32 0, i32 ${member.index}`);
+                this.emit(`store ${member.llvmType} ${toStore.value}, ${member.llvmType}* ${fieldPtr}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
+            }
+
+            return { value: structPtr, type: `${structType}*` };
+        }
+
         // Compile-time sealed object literal -> unique struct type
         const literalId = this.objectLiteralCounter++;
         const structName = `%struct.object_literal_${literalId}`;
@@ -2462,9 +2524,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             index++;
         }
 
-        // Emit struct definition if not already done
+        // Emit struct definition if not already done. Hoist to module scope to keep IR valid.
+        const structDef = `${structName} = type { ${fields.join(', ')} }`;
         if (!this.classDefinitions.has(classKey)) {
-            this.emit(`${structName} = type { ${fields.join(', ')} }`, false);
+            this.emitHoisted(structDef);
             this.classDefinitions.set(classKey, {
                 llvmType: structName,
                 members: membersMap,

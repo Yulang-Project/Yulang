@@ -1,0 +1,15 @@
+#import "std/io" as io;
+
+struct Point {
+  x: i32;
+  y: i32;
+}
+fun main(): i32 {
+  let pp: Point = {
+   x: 10,
+   y: 20
+  };
+  io.output("hello\n");
+  io.println(pp.x);
+  return 0;
+}
