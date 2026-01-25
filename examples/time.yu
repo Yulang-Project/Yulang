@@ -13,6 +13,6 @@ fun main(): i32 {
     time.sleep(1);
     io.println("发射！");
     io.println("当前时间戳: " + toString(time.now()));
-    io.println("格林尼治时间: " time.gmt());
+    io.println("格林尼治时间: " + time.gmt());
     return 0;
 }

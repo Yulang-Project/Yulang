@@ -24,16 +24,11 @@ export fun now(): i64 {
     return syscall(201, 0, 0, 0, 0, 0, 0);
 }
 
-export fun format_hms(total_seconds: i64): void {
+export fun format_hms(total_seconds: i64): string {
     let s: i64 = total_seconds % 60;
     let m: i64 = (total_seconds / 60) % 60;
     let h: i64 = (total_seconds / 3600) % 24;
-
-    io.print(toString(h));
-    io.print(":");
-    io.print(toString(m));
-    io.print(":");
-    io.println(toString(s));
+    return toString(h) + ":" + toString(m) + ":" + toString(s);
 }
 
 export fun gmt(): string {
