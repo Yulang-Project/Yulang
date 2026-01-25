@@ -21,7 +21,7 @@ export class ExpressionParser {
     }
 
     private assignment(): Expr {
-        const expr = this.equality();
+        const expr = this.logicOr(); // Start with the lowest precedence logical operator
 
         if (this.parser.match(TokenType.EQ)) {
             const equals = this.parser.previous();
@@ -37,41 +37,89 @@ export class ExpressionParser {
         return expr;
     }
 
-    // equality       → comparison ( ( "!=" | "==" ) comparison )* ;
-    private equality(): Expr {
-        let expr = this.logicAnd(); // Changed from this.bitwiseOr()
+    // logicOr        → logicAnd ( "||" logicAnd )* ;
+    private logicOr(): Expr {
+        let expr = this.logicAnd();
 
-        while (this.parser.match(TokenType.BANG_EQ, TokenType.EQ_EQ)) {
+        while (this.parser.match(TokenType.PIPE_PIPE)) {
             const operator = this.parser.previous();
-            const right = this.logicAnd(); // Changed from this.bitwiseOr()
+            const right = this.logicAnd();
             expr = new BinaryExpr(expr, operator, right);
         }
-
         return expr;
     }
 
-    // NEW: logicAnd → bitwiseOr ( "&&" bitwiseOr )* ;
+    // logicAnd       → equality ( "&&" equality )* ;
     private logicAnd(): Expr {
-        let expr = this.bitwiseOr();
+        let expr = this.equality();
 
         while (this.parser.match(TokenType.AMP_AMP)) {
+            const operator = this.parser.previous();
+            const right = this.equality();
+            expr = new BinaryExpr(expr, operator, right);
+        }
+        return expr;
+    }
+
+    // equality       → bitwiseOr ( ( "!=" | "==" ) bitwiseOr )* ;
+    private equality(): Expr {
+        let expr = this.bitwiseOr();
+
+        while (this.parser.match(TokenType.BANG_EQ, TokenType.EQ_EQ)) {
             const operator = this.parser.previous();
             const right = this.bitwiseOr();
             expr = new BinaryExpr(expr, operator, right);
         }
+
         return expr;
     }
 
-    // NEW: bitwiseOr       → comparison ( "|" comparison )* ;
+    // bitwiseOr       → bitwiseXor ( "|" bitwiseXor )* ;
     private bitwiseOr(): Expr {
-        let expr = this.comparison(); // Starts with comparison
+        let expr = this.bitwiseXor();
 
         while (this.parser.match(TokenType.PIPE)) {
             const operator = this.parser.previous();
-            const right = this.comparison(); // Use comparison for right operand
+            const right = this.bitwiseXor();
             expr = new BinaryExpr(expr, operator, right);
         }
 
+        return expr;
+    }
+
+    // bitwiseXor      → bitwiseAnd ( "^" bitwiseAnd )* ;
+    private bitwiseXor(): Expr {
+        let expr = this.bitwiseAnd();
+
+        while (this.parser.match(TokenType.CARET)) {
+            const operator = this.parser.previous();
+            const right = this.bitwiseAnd();
+            expr = new BinaryExpr(expr, operator, right);
+        }
+        return expr;
+    }
+
+    // bitwiseAnd      → shift ( "&" shift )* ;
+    private bitwiseAnd(): Expr {
+        let expr = this.shift();
+
+        while (this.parser.match(TokenType.AMPERSAND)) {
+            const operator = this.parser.previous();
+            const right = this.shift();
+            expr = new BinaryExpr(expr, operator, right);
+        }
+        return expr;
+    }
+
+    // shift           → comparison ( ( "<<" | ">>" ) comparison )* ;
+    private shift(): Expr {
+        let expr = this.comparison();
+
+        while (this.parser.match(TokenType.LT_LT, TokenType.GT_GT)) {
+            const operator = this.parser.previous();
+            const right = this.comparison();
+            expr = new BinaryExpr(expr, operator, right);
+        }
         return expr;
     }
 
@@ -101,11 +149,11 @@ export class ExpressionParser {
         return expr;
     }
 
-    // factor         → unary ( ( "/" | "*" ) unary )* ;
+    // factor         → unary ( ( "/" | "*" | "%" ) unary )* ;
     private factor(): Expr {
         let expr = this.unary();
 
-        while (this.parser.match(TokenType.SLASH, TokenType.STAR)) {
+        while (this.parser.match(TokenType.SLASH, TokenType.STAR, TokenType.PERCENT)) {
             const operator = this.parser.previous();
             const right = this.unary();
             expr = new BinaryExpr(expr, operator, right);
@@ -114,7 +162,7 @@ export class ExpressionParser {
         return expr;
     }
 
-    // unary          → ( "!" | "-" | "delete" | "&" | "*" ) unary | call ;
+    // unary          → ( "!" | "-" | "&" | "*" | "delete" ) unary | call ;
     private unary(): Expr {
         if (this.parser.match(TokenType.BANG, TokenType.MINUS, TokenType.AMPERSAND, TokenType.STAR)) {
             const operator = this.parser.previous();

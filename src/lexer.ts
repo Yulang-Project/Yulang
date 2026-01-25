@@ -180,6 +180,7 @@ export class Lexer {
 
             case '+': this.addToken(TokenType.PLUS); break;
             case '*': this.addToken(TokenType.STAR); break;
+            case '%': this.addToken(TokenType.PERCENT); break; // Add PERCENT
             case '/':
                 if (this.match('/')) {
                     // A single-line comment goes until the end of the line.
@@ -215,11 +216,20 @@ export class Lexer {
                 this.addToken(this.match('=') ? TokenType.BANG_EQ : TokenType.BANG);
                 break;
             case '<':
-                this.addToken(this.match('=') ? TokenType.LT_EQ : TokenType.LT);
+                if (this.match('<')) {
+                    this.addToken(TokenType.LT_LT); // Add LT_LT
+                } else {
+                    this.addToken(this.match('=') ? TokenType.LT_EQ : TokenType.LT);
+                }
                 break;
             case '>':
-                this.addToken(this.match('=') ? TokenType.GT_EQ : TokenType.GT);
+                if (this.match('>')) {
+                    this.addToken(TokenType.GT_GT); // Add GT_GT
+                } else {
+                    this.addToken(this.match('=') ? TokenType.GT_EQ : TokenType.GT);
+                }
                 break;
+            case '^': this.addToken(TokenType.CARET); break; // Add CARET
 
             case '&':
                 if (this.match('&')) {

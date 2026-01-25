@@ -70,6 +70,10 @@ export enum TokenType {
     AMP_AMP = 'AMP_AMP', // &&
     PIPE = 'PIPE', // | (NEW)
     PIPE_PIPE = 'PIPE_PIPE', // ||
+    CARET = 'CARET', // ^ (新增)
+    PERCENT = 'PERCENT', // % (新增)
+    LT_LT = 'LT_LT', // << (新增)
+    GT_GT = 'GT_GT', // >> (新增)
     ARROW = 'ARROW', // -> (legacy, no longer used for pointer init)
 
     // Delimiters/Punctuators

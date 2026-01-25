@@ -982,6 +982,24 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             case TokenType.SLASH:
                 this.emit(`${resultVar} = sdiv ${left.type} ${left.value}, ${right.value}`);
                 return { value: resultVar, type: left.type };
+            case TokenType.PERCENT: // Added PERCENT for modulo
+                this.emit(`${resultVar} = srem ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
+            case TokenType.AMPERSAND: // Added AMPERSAND for bitwise AND
+                this.emit(`${resultVar} = and ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
+            case TokenType.PIPE: // Added PIPE for bitwise OR
+                this.emit(`${resultVar} = or ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
+            case TokenType.CARET: // Added CARET for bitwise XOR
+                this.emit(`${resultVar} = xor ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
+            case TokenType.LT_LT: // Added LT_LT for left shift
+                this.emit(`${resultVar} = shl ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
+            case TokenType.GT_GT: // Added GT_GT for right shift (arithmetic right shift for signed)
+                this.emit(`${resultVar} = ashr ${left.type} ${left.value}, ${right.value}`);
+                return { value: resultVar, type: left.type };
             
             // Comparison operators
             case TokenType.EQ_EQ:

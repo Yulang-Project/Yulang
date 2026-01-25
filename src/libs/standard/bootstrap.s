@@ -9,10 +9,10 @@ _start:
     andq $-16, %rsp      
     
     # --- 逻辑跳转 ---
-    call main         # 假设你的 LLVM 函数叫 my_main
+    call main
     
     # --- 退出处理 ---
-    movq %rax, %rdi      # 将 my_main 返回值传给 exit 的第一个参数
+    movq %rax, %rdi
     movq $60, %rax       # sys_exit 的编号
     syscall
 
