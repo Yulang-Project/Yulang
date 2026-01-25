@@ -1,0 +1,32 @@
+#import "std/net" as net;
+#import "std/io" as io;
+
+fun main(): i32 {
+    let server = net.listen(8888);
+    if (server < 0) {
+        io.println("Server 启动失败，可能端口被占用了");
+        return 1;
+    }
+
+    io.println("Server 正在 8888 端口待命...");
+
+    while (1 == 1) {
+        let client = net.accept(server);
+        if (client > 0) {
+            io.println("收到新请求！");
+
+            // 构造 HTTP 响应（注意 HTTP 协议格式要求很严）
+            let msg = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello New World!";
+            let data_ptr: i64 = _builtin_string_to_ptr(msg) as i64;
+            let data_len: i64 = _builtin_string_get_len(msg);
+            
+            // 系统调用 1 是 write(fd, buf, count)
+            syscall(1, client, data_ptr, data_len);
+
+
+            // 系统调用 3 是 close(fd)
+            syscall(3, client, 0, 0, 0, 0, 0);
+        }
+    }
+    return 0;
+}
