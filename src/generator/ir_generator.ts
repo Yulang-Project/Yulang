@@ -555,6 +555,13 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const fieldTypes: string[] = [];
         const initValues: string[] = [];
 
+        // First pass: Process nested imports to ensure their module objects are built and available
+        moduleStatements.forEach(stmt => {
+            if (stmt instanceof ImportStmt) {
+                this.visitImportStmt(stmt);
+            }
+        });
+
         // Emit struct/class definitions inside module so types are known
         moduleStatements.forEach(stmt => {
             if (stmt instanceof StructDeclaration) {
@@ -566,7 +573,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         let index = 0;
         moduleStatements.forEach(stmt => {
-            if (stmt instanceof FunctionDeclaration || stmt instanceof DeclareFunction) {
+            if (stmt instanceof FunctionDeclaration) { // Handle exported functions
+                if (!stmt.isExported) return; // Only process exported functions
+
                 const originalFuncName = stmt.name.lexeme;
                 const mangledName = `_mod_${moduleNamePart}_${originalFuncName}`;
                 const fullName = `@${mangledName}`;
@@ -584,19 +593,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                     const savedMangleFlag = this.mangleStdLib;
                     this.sourceFilePath = fullModulePath;
                     this.mangleStdLib = false;
-                    if (stmt instanceof FunctionDeclaration) {
-                        stmt.isExported = true;
-                        this.visitFunctionDeclaration(stmt);
-                    } else {
-                        if (isSret) {
-                            const sretAlign = this.llvmHelper.getAlign(llvmReturnType);
-                            const paramsString = [ `ptr sret(${llvmReturnType}) align ${sretAlign}`, ...paramTypes ].filter(p => p.length > 0).join(', ');
-                            this.emit(`declare void ${fullName}(${paramsString})`, false);
-                        } else {
-                            const paramsString = paramTypes.join(', ');
-                            this.emit(`declare ${llvmReturnType} ${fullName}(${paramsString})`, false);
-                        }
-                    }
+                    this.visitFunctionDeclaration(stmt);
                     this.sourceFilePath = savedPath;
                     this.mangleStdLib = savedMangleFlag;
                     this.generatedFunctions.add(`${fullModulePath}.${originalFuncName}`);
@@ -605,6 +602,67 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 members.set(originalFuncName, { llvmType: funcType, index, ptr: fullName });
                 fieldTypes.push(funcType);
                 initValues.push(`${funcType} ${fullName}`);
+                index++;
+            } else if (stmt instanceof DeclareFunction) { // Declare functions are implicitly external/exported
+                const originalFuncName = stmt.name.lexeme;
+                const mangledName = `_mod_${moduleNamePart}_${originalFuncName}`;
+                const fullName = `@${mangledName}`;
+
+                const llvmReturnType = this.llvmHelper.getLLVMType(stmt.returnType);
+                const paramTypes = stmt.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+                const isSret = llvmReturnType.startsWith('%struct.') && !llvmReturnType.endsWith('*');
+                const funcParamTypes = isSret ? [ `${llvmReturnType}*`, ...paramTypes ] : paramTypes;
+                const funcType = isSret
+                    ? `void (${funcParamTypes.join(', ')})*`
+                    : `${llvmReturnType} (${funcParamTypes.join(', ')})*`;
+                
+                // For DeclareFunction, we always emit a declare statement.
+                if (isSret) {
+                    const sretAlign = this.llvmHelper.getAlign(llvmReturnType);
+                    const paramsString = [ `ptr sret(${llvmReturnType}) align ${sretAlign}`, ...paramTypes ].filter(p => p.length > 0).join(', ');
+                    this.emit(`declare void ${fullName}(${paramsString})`, false);
+                } else {
+                    const paramsString = paramTypes.join(', ');
+                    this.emit(`declare ${llvmReturnType} ${fullName}(${paramsString})`, false);
+                }
+
+                members.set(originalFuncName, { llvmType: funcType, index, ptr: fullName });
+                fieldTypes.push(funcType);
+                initValues.push(`${funcType} ${fullName}`);
+                index++;
+            } else if (stmt instanceof ClassDeclaration) { // Handle exported classes
+                if (!stmt.isExported) return; // Only process exported classes
+
+                const className = stmt.name.lexeme;
+                const structType = `%struct.${className}`;
+                const classPtrType = `${structType}*`; // Modules can expose class types as pointers to their struct representation
+                
+                // Ensure the class definition itself is emitted
+                this.visitClassDeclaration(stmt); 
+                
+                // Add the class type to module members
+                // The 'ptr' here can be the struct name itself for lookup, or a global variable representing the class metadata.
+                // For now, let's use the struct name as the 'ptr'.
+                members.set(className, { llvmType: classPtrType, index, ptr: structType });
+                fieldTypes.push(classPtrType);
+                // For initValue, it's typically null or a reference to a type descriptor if LLVM IR had such a concept directly.
+                // Using 'null' for now as a placeholder for the type itself.
+                initValues.push(`${classPtrType} null`);
+                index++;
+            } else if (stmt instanceof StructDeclaration) { // Handle exported structs
+                if (!stmt.isExported) return; // Only process exported structs
+
+                const structName = stmt.name.lexeme;
+                const structLlvmType = `%struct.${structName}`;
+                const structPtrType = `${structLlvmType}*`;
+
+                // Ensure the struct definition itself is emitted
+                this.visitStructDeclaration(stmt);
+
+                // Add the struct type to module members
+                members.set(structName, { llvmType: structPtrType, index, ptr: structLlvmType });
+                fieldTypes.push(structPtrType);
+                initValues.push(`${structPtrType} null`);
                 index++;
             }
         });
@@ -916,7 +974,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             if (name === 'syscall') {
                 return { value: '__syscall6', type: 'internal_syscall' }; // Use internal syscall wrapper
             }
-            throw new Error(`Undefined variable or function: ${name}`); // This is the error being thrown
+            throw new Error(`Undefined variable or function: ${name} in ${this.sourceFilePath} at ${expr.name.line}:${expr.name.column}`);
         }
         if (this.debug) console.log("Found identifier:", name, "entry:", entry);
 
