@@ -45,6 +45,8 @@ export enum TokenType {
     ARRAY = 'ARRAY', // NEW: Add ARRAY token
     OBJECT = 'OBJECT', // NEW: Add OBJECT token
     POINTER = 'POINTER', // NEW: Add POINTER token
+    TRUE = 'TRUE', // NEW: Add TRUE token
+    FALSE = 'FALSE', // NEW: Add FALSE token
     // Identifiers
     IDENTIFIER = 'IDENTIFIER',
 
@@ -159,4 +161,6 @@ Object.assign(keywords, {
     'array': TokenType.ARRAY,
     'object': TokenType.OBJECT, // NEW
     'pointer': TokenType.POINTER,
+    'true': TokenType.TRUE, // NEW
+    'false': TokenType.FALSE, // NEW
 })

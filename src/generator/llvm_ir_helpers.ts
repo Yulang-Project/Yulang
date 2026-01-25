@@ -135,6 +135,8 @@ export class LLVMIRHelper {
                     return 'f32';
                 case 'f64':
                     return 'f64';
+                case 'i16': // Added i16 type mapping
+                    return 'i16';
                 case 'bool':
                     return 'i1';
                 case 'char':

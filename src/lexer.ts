@@ -71,6 +71,12 @@ export class Lexer {
         return this.isAlpha(char) || this.isDigit(char);
     }
 
+    private isHexDigit(char: string): boolean { // Added isHexDigit
+        return (char >= '0' && char <= '9') ||
+               (char >= 'a' && char <= 'f') ||
+               (char >= 'A' && char <= 'F');
+    }
+
     private number(): void {
         while (this.isDigit(this.peek())) this.advance();
 
@@ -80,6 +86,17 @@ export class Lexer {
         }
 
         this.addToken(TokenType.NUMBER, parseFloat(this.source.substring(this.start, this.current)));
+    }
+
+    private hexNumber(): void { // Added hexNumber
+        this.advance(); // consume 'x' or 'X'
+
+        while (this.isHexDigit(this.peek())) {
+            this.advance();
+        }
+
+        const hexString = this.source.substring(this.start + 2, this.current); // +2 to skip "0x"
+        this.addToken(TokenType.NUMBER, parseInt(hexString, 16));
     }
 
     private string(): void {
@@ -268,7 +285,11 @@ export class Lexer {
 
             default:
                 if (this.isDigit(char)) {
-                    this.number();
+                    if (char === '0' && (this.peek() === 'x' || this.peek() === 'X')) {
+                        this.hexNumber();
+                    } else {
+                        this.number();
+                    }
                 } else if (this.isAlpha(char)) {
                     this.identifierOrKeyword();
                 } else {

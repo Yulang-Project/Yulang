@@ -241,10 +241,17 @@ export class ExpressionParser {
         return args;
     }
 
-    // primary        → NUMBER | STRING_LITERAL | IDENTIFIER | "(" expression ")" | CHAR_LITERAL | OBJECT_LITERAL ;
+    // primary        → NUMBER | STRING_LITERAL | IDENTIFIER | "(" expression ")" | CHAR_LITERAL | OBJECT_LITERAL | TRUE | FALSE;
     private primary(): Expr {
         if (this.parser.match(TokenType.NUMBER, TokenType.STRING_LITERAL, TokenType.CHAR_LITERAL)) {
             return new LiteralExpr(this.parser.previous().literal);
+        }
+
+        if (this.parser.match(TokenType.TRUE)) { // NEW: Handle true literal
+            return new LiteralExpr(true);
+        }
+        if (this.parser.match(TokenType.FALSE)) { // NEW: Handle false literal
+            return new LiteralExpr(false);
         }
 
         if (this.parser.match(TokenType.IDENTIFIER, TokenType.SYSCALL, TokenType.ADDROF, TokenType.OBJOF)) {
