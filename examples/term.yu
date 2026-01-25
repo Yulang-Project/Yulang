@@ -1,0 +1,66 @@
+#import "std/term" as term;
+#import "std/io" as io;
+#import "std/time" as time;
+
+fun main(): i32 {
+    io.println("\033");
+    term.hide_cursor(); // 隐藏光标，让界面更干净
+    term.clear();       // 清屏
+
+    term.fg_cyan();
+    term.bold();
+    term.move_cursor(3, 5);
+    io.println("🚀 Term模块演示🚀");
+    term.reset();
+
+    // 绘制加载条边框
+    term.fg_white();
+    term.move_cursor(5, 5);
+    io.print("[");
+    term.move_cursor(5, 55); // 边框长度 50
+    io.println("]");
+    term.reset();
+
+    term.move_cursor(7, 5);
+    io.println("正在加载模块...");
+
+    let progress: i64 = 0;
+    while (progress <= 50) {
+        term.move_cursor(5, 6 + progress); // 移动到加载条内部
+        
+        // 根据进度改变颜色
+        if (progress < 15) { term.fg_red(); }
+        else if (progress < 30) { term.fg_yellow(); }
+        else { term.fg_green(); }
+        
+        io.print("#"); // 打印一个进度块
+        term.reset();
+        
+        term.move_cursor(7, 25); // 更新百分比
+        io.print(toString((progress * 100) / 50));
+        io.print("% ");
+        
+        time.sleep(1); // 暂停 1 秒 (用你的 time.sleep)
+        progress = progress + 1;
+    }
+
+    // 加载完成后的消息框
+    term.move_cursor(9, 5);
+    term.bg_green();
+    term.fg_black();
+    io.print("                                            "); // 填充背景
+    term.move_cursor(9, 10);
+    io.print("✅ 所有模块加载完成！享受吧！🎉");
+    term.reset();
+    term.move_cursor(10, 5); // 移到下一行，避免重叠
+
+    time.sleep(3); // 等待 3 秒让用户看清
+
+    term.show_cursor(); // 恢复光标
+    term.clear();       // 最终清屏
+    term.fg_blue();
+    io.println("演示结束");
+    term.reset();
+
+    return 0;
+}

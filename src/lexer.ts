@@ -112,6 +112,18 @@ export class Lexer {
                     case '\\': value += '\\'; this.advance(); break;
                     case '"': value += '"'; this.advance(); break;
                     case '0': value += '\0'; this.advance(); break;
+                    case 'x':
+                        this.advance(); // consume 'x'
+                        if (this.isHexDigit(this.peek()) && this.isHexDigit(this.peekNext())) {
+                            const hex = this.source.substring(this.current, this.current + 2);
+                            value += String.fromCharCode(parseInt(hex, 16));
+                            this.advance(); // consume first hex digit
+                            this.advance(); // consume second hex digit
+                        } else {
+                            // Invalid hex escape sequence, just append '\x'
+                            value += '\\x';
+                        }
+                        break;
                     default: value += esc; this.advance(); break;
                 }
             } else {

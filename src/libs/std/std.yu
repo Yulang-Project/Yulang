@@ -1,1 +1,3 @@
-// std 根模块占位（具体功能请按子模块导入，如 std/io）
+export fun strlen(str: string): i64 {
+    return _builtin_string_get_len(str)
+}
