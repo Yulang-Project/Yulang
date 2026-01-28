@@ -42,13 +42,13 @@ export class DeclarationParser {
         if (this.parser.match(TokenType.COLON)) {
             returnType = this.typeParser.parse();
         }
-        
+
         this.parser.consume(TokenType.LBRACE, `Expect '{' before ${kind} body.`);
         const body = this.parser.block();
 
         return new FunctionDeclaration(name, parameters, returnType, body, isExported, visibility);
     }
-    
+
     public structDeclaration(): StructDeclaration { // NEW: structDeclaration
         let name: Token;
         if (this.parser.match(TokenType.IDENTIFIER, TokenType.STRING)) {
@@ -60,7 +60,7 @@ export class DeclarationParser {
         this.parser.consume(TokenType.LBRACE, "Expect '{' before struct body.");
 
         const properties: PropertyDeclaration[] = [];
-        
+
         while (!this.parser.check(TokenType.RBRACE) && !this.parser.isAtEnd()) {
             // Struct properties are implicitly public.
             const visibility = new Token(TokenType.PUBLIC, 'public', null, this.parser.peek().line, this.parser.peek().column);
@@ -105,11 +105,11 @@ export class DeclarationParser {
         let initializer: Expr | null = null;
         this.parser.consume(TokenType.EQ, "Expect '=' after constant name."); // const requires an initializer
         initializer = this.parser.expression();
-        
+
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after constant declaration.");
         return new ConstStmt(name, type, initializer, isExported);
     }
-        
+
     public usingDeclaration(): Stmt {
         const path = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for #using path.");
         this.parser.consume(TokenType.AS, "Expect 'as' after #using path.");
@@ -122,7 +122,7 @@ export class DeclarationParser {
         // 声明还没做
         return new ExpressionStmt(new LiteralExpr(`USING ${path.lexeme} AS ${alias.lexeme} HEAD ${headPath ? headPath.lexeme : ''}`));
     }
-    
+
     public importDeclaration(): Stmt {
         let namespaceAlias: Token | null = null;
         // Syntax: #import "path" as alias;
@@ -133,20 +133,23 @@ export class DeclarationParser {
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after import declaration.");
 
         const modulePath = pathToken.literal as string;
-        
-        // Resolve module path
-        const currentFileDir = path.dirname(this.parser.currentFilePath);
+
+        // Resolve module path using the finder
         let fullModulePath: string;
-        if (modulePath === 'std') {
-            fullModulePath = path.resolve(process.cwd(), 'src/libs/std/std.yu');
-        } else if (modulePath.startsWith('std/')) {
-            const subPath = modulePath.slice(4); // after "std/"
-            fullModulePath = path.resolve(process.cwd(), 'src/libs/std', `${subPath}.yu`);
-        } else if (modulePath.startsWith('/')) {
+
+        if (modulePath === 'std' || modulePath.startsWith('std/')) {
+            fullModulePath = this.parser.finder.getStdLibModulePath(
+                this.parser.osIdentifier,
+                this.parser.archIdentifier,
+                modulePath
+            );
+        } else if (path.isAbsolute(modulePath) || modulePath.startsWith('/')) {
             fullModulePath = path.resolve(modulePath + '.yu');
         } else {
+            const currentFileDir = path.dirname(this.parser.currentFilePath);
             fullModulePath = path.resolve(currentFileDir, modulePath + '.yu');
         }
+
 
         if (!fs.existsSync(fullModulePath)) {
             throw this.parser.error(pathToken, `Module not found: ${fullModulePath}`);
@@ -162,7 +165,7 @@ export class DeclarationParser {
         const moduleSourceCode = fs.readFileSync(fullModulePath, 'utf8');
         const moduleLexer = new Lexer(moduleSourceCode);
         const moduleTokens = moduleLexer.tokenize();
-        const moduleParser = new Parser(moduleTokens, fullModulePath); // Pass module's own path for nested imports
+        const moduleParser = new Parser(moduleTokens, this.parser.finder, this.parser.osIdentifier, this.parser.archIdentifier, fullModulePath); // Pass module's own path for nested imports
         const moduleStatements = moduleParser.parse(); // Recursively parse the module
 
         // Store module declarations
@@ -185,7 +188,7 @@ export class DeclarationParser {
 
         const properties: PropertyDeclaration[] = [];
         const methods: FunctionDeclaration[] = [];
-        
+
         while (!this.parser.check(TokenType.RBRACE) && !this.parser.isAtEnd()) {
             let visibility: Token | null = null;
             if (this.parser.match(TokenType.PUBLIC, TokenType.PRIVATE)) {
@@ -229,7 +232,7 @@ export class DeclarationParser {
         if (this.parser.match(TokenType.COLON)) {
             returnType = this.typeParser.parse();
         }
-        
+
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after declared function signature.");
 
         return new DeclareFunction(name, parameters, returnType);

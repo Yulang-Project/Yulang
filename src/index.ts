@@ -9,9 +9,17 @@ import { Lexer } from './lexer.js';
 import { Parser } from './parser/index.js';
 import { IRGenerator } from './generator/ir_generator.js';
 import { Stmt, AstPrinter, FunctionDeclaration, Parameter, TypeAnnotation, DeclareFunction, ClassDeclaration, StructDeclaration, PropertyDeclaration } from './ast.js';
+import { ProjectFinder } from './Finder.js';
 import { LinuxPlatform } from './platform/os/linux/LinuxPlatform.js';
 import { X86_64Architecture } from './platform/arch/x86_64/X86_64Architecture.js';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
+// 获取当前文件的完整绝对路径 (相当于 __filename)
+const __filename = fileURLToPath(import.meta.url);
+
+// 获取当前文件所在的目录路径 (相当于 __dirname)
+const __dirname = dirname(__filename);
 const cli = cac('tsyuc');
 
 cli
@@ -48,7 +56,12 @@ cli
       }
 
       // 2. Parsing
-      const parser = new Parser(tokens, inputFilePath); // Pass inputFilePath
+      // NEW: Create finder for parsing
+      const projectRoot = path.resolve(__dirname, '..'); // Assuming index.ts is in dist/
+      const finder = new ProjectFinder(projectRoot);
+      const osIdentifier = "linux"; // TODO: Make this dynamic
+      const archIdentifier = "x86_64"; // TODO: Make this dynamic
+      const parser = new Parser(tokens, finder, osIdentifier, archIdentifier, inputFilePath);
       const statements: Stmt[] = parser.parse();
       if (options.debug) {
         console.log("\n--- AST ---");
@@ -158,8 +171,11 @@ cli
 
           if (options.target === 'exec') {
             // 5. Link object file into an executable（仅引导+用户目标，不再预编译 std）
-            console.log(`  [CMD] ld -o ${outputFilePath} dist/libs/standard/bootstrap.o ${objPath} -dynamic-linker /lib64/ld-linux-x86-64.so.2 -m elf_x86_64 --eh-frame-hdr -pie -z relro -z now`);
-            execFileSync('ld', ['-o', outputFilePath, 'dist/libs/standard/bootstrap.o', objPath, '-dynamic-linker', '/lib64/ld-linux-x86-64.so.2', '-m', 'elf_x86_64', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'], { stdio: 'inherit' });
+            const bootstrapPath = finder.getBootstrapPath(osIdentifier, archIdentifier);
+            const dynamicLinker = finder.getLinkerDynamicLinker(osIdentifier, archIdentifier);
+            const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
+            console.log(`  [CMD] ld -o ${outputFilePath} ${bootstrapPath} ${objPath} -dynamic-linker ${dynamicLinker} ${linkerFlags.join(' ')}`);
+            execFileSync('ld', ['-o', outputFilePath, bootstrapPath, objPath, '-dynamic-linker', dynamicLinker, ...linkerFlags], { stdio: 'inherit' });
           } else if (options.target === 'static-lib') {
             // 5. Create static library (.a)
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);

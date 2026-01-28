@@ -7,6 +7,7 @@ import { ExpressionParser } from './expression_parser.js';
 import { DeclarationParser } from './declaration_parser.js';
 import { StatementParser } from './statement_parser.js';
 import { TypeParser } from './type_parser.js';
+import type { IFinder } from '../Finder.js'; // NEW: Import IFinder
 
 
 class ParseError extends Error {
@@ -17,18 +18,23 @@ export class Parser {
     public tokens: Token[];
     public current = 0;
     public hadError = false;
-    public currentFilePath: string; // NEW
-
+    public currentFilePath: string;
     public expressionParser: ExpressionParser;
     public declarationParser: DeclarationParser;
     public statementParser: StatementParser;
     public typeParser: TypeParser;
     public moduleDeclarations: Map<string, Stmt[]> = new Map();
+    public finder: IFinder;
+    public osIdentifier: string;
+    public archIdentifier: string;
 
 
-    constructor(tokens: Token[], currentFilePath: string = "unknown") { // Modify constructor
+    constructor(tokens: Token[], finder: IFinder, osIdentifier: string, archIdentifier: string, currentFilePath: string = "unknown") { // Modify constructor
         this.tokens = tokens;
-        this.currentFilePath = currentFilePath; // NEW
+        this.finder = finder;
+        this.osIdentifier = osIdentifier;
+        this.archIdentifier = archIdentifier;
+        this.currentFilePath = currentFilePath;
         this.expressionParser = new ExpressionParser(this);
         this.declarationParser = new DeclarationParser(this);
         this.statementParser = new StatementParser(this);

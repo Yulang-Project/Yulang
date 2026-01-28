@@ -123,7 +123,7 @@ export class LinuxPlatform implements IPlatform {
 
     emitLowLevelRuntime(generator: IRGenerator): void {
         // Internal heap init function
-        generator.emit(`define void @__heap_init_internal() {`, false);
+        generator.emit(`define internal void @__heap_init_internal() {`, false);
         generator.indentLevel++;
         const initFlagHeap = generator.llvmHelper.getNewTempVar();
         generator.emit(`${initFlagHeap} = load i1, i1* @__heap_initialized, align 1`);
@@ -154,7 +154,7 @@ export class LinuxPlatform implements IPlatform {
         generator.emit(``, false);
 
         // Internal malloc function, renamed to yulang_malloc for external linkage
-        generator.emit(`define i8* @yulang_malloc(i64 %size) {`, false);
+        generator.emit(`define internal i8* @yulang_malloc(i64 %size) {`, false);
         generator.indentLevel++;
         // Ensure heap is initialized before allocating
         generator.emit(`call void @__heap_init_internal()`);
