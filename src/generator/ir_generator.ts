@@ -14,6 +14,7 @@ import * as process from 'process'; // Added process import
 import { BuiltinFunctions } from './builtins.js';
 import { LangItems } from './lang_items.js';
 import { findPredefinedFunction } from '../predefine/funs.js';
+import type { IPlatform } from '../platform/IPlatform.js'; // NEW: Import IPlatform
 
 export type IRValue = { value: string, type: string, classInstancePtr?: string, classInstancePtrType?: string, ptr?: string, ptrType?: string, address?: string };
 
@@ -190,6 +191,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private moduleObjects: Map<string, { structName: string, globalName: string, members: Map<string, ModuleMember>, initialized: boolean }> = new Map();
     private hoistedDefinitions: string[] = []; // Type/const definitions emitted inside functions that must live at module scope
     private hoistedFunctions: string[][] = []; // Full function definitions emitted while inside another function
+    private platform: IPlatform; // NEW: Platform abstraction interface
 
     // Splits a LLVM struct type string "{ T1, T2, ... }" into its top-level fields safely (ignoring nested commas).
     private splitStructFields(structType: string): string[] {
@@ -224,18 +226,19 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         if (lines.length > 0) this.hoistedFunctions.push(lines);
     }
 
-    constructor(parser: Parser, mangleStdLib: boolean = true, sourceFilePath: string = '', debug: boolean = false) { // Accept sourceFilePath parameter
+    constructor(platform: IPlatform, parser: Parser, mangleStdLib: boolean = true, sourceFilePath: string = '', debug: boolean = false) {
+        this.platform = platform; // Accept sourceFilePath parameter
         this.parser = parser;
         this.mangleStdLib = mangleStdLib;
         this.sourceFilePath = sourceFilePath; // Initialize new field
         this.debug = debug; // Initialize new debug flag
         this.builtins = new BuiltinFunctions(this.llvmHelper);
         this.llvmHelper.setGenerator(this); // Set back-reference for helpers
-        this.emit(`target triple = "${this.llvmHelper.getTargetTriple()}"`, false);
-        this.emit(`target datalayout = "${this.llvmHelper.getDataLayout()}"`, false);
+        this.emit(`target triple = "${this.platform.architecture.getTargetTriple()}"`, false);
+        this.emit(`target datalayout = "${this.platform.architecture.getDataLayout()}"`, false);
         this.emitLangItemStructs();
-        this.emitHeapGlobals();
         this.emitLowLevelRuntime();
+        this.emitHeapGlobals();
         this.emit("", false);
         // dlopen and dlsym are no longer declared here for stdlib
     }
@@ -354,160 +357,43 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private emitHeapGlobals(): void {
         if (this.heapGlobalsEmitted) return;
         this.heapGlobalsEmitted = true;
-        this.emit(`@__heap_base = internal global i8* null, align 8`, false);
-        this.emit(`@__heap_brk = internal global i8* null, align 8`, false);
-        this.emit(`@__heap_initialized = internal global i1 false, align 1`, false);
-        this.emit(`@__free_list = internal global %struct.free_node* null, align 8`, false);
+        this.platform.emitGlobalDefinitions(this);
     }
 
     private emitLowLevelRuntime(): void {
         if (this.lowLevelRuntimeEmitted) return;
         this.lowLevelRuntimeEmitted = true;
-        // free list struct (unused for now but kept for ABI)
-        this.emit(`%struct.free_node = type { i64, i8* }`, false);
-        // syscall wrapper: __syscall6(n, a1..a6)
-        this.emit(`define internal i64 @__syscall6(i64 %n, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {`, false);
-        this.indentLevel++;
-        const res = this.llvmHelper.getNewTempVar();
-        this.emit(`${res} = call i64 asm sideeffect "syscall", "={rax},0,{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}"(i64 %n, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)`, true);
-        this.emit(`ret i64 ${res}`);
-        this.indentLevel--;
-        this.emit(`}`, false);
-        this.emit(``, false);
-
-        // memcpy inline implementation (byte loop)
-        this.emit(`define internal void @__memcpy_inline(i8* %dst, i8* %src, i64 %len) {`, false);
-        this.indentLevel++;
-        const cmp = this.getNewLabel('memcpy.cmp');
-        const body = this.getNewLabel('memcpy.body');
-        const exit = this.getNewLabel('memcpy.exit');
-        const idx = this.llvmHelper.getNewTempVar();
-        this.emit(`${idx} = alloca i64, align 8`);
-        this.emit(`store i64 0, i64* ${idx}, align 8`);
-        this.emit(`br label %${cmp}`);
-
-        this.emit(`${cmp}:`, false);
-        const cur = this.llvmHelper.getNewTempVar();
-        this.emit(`${cur} = load i64, i64* ${idx}, align 8`);
-        const cond = this.llvmHelper.getNewTempVar();
-        this.emit(`${cond} = icmp ult i64 ${cur}, %len`);
-        this.emit(`br i1 ${cond}, label %${body}, label %${exit}`);
-
-        this.emit(`${body}:`, false);
-        const dstPtr = this.llvmHelper.getNewTempVar();
-        this.emit(`${dstPtr} = getelementptr inbounds i8, i8* %dst, i64 ${cur}`);
-        const srcPtr = this.llvmHelper.getNewTempVar();
-        this.emit(`${srcPtr} = getelementptr inbounds i8, i8* %src, i64 ${cur}`);
-        const byteVal = this.llvmHelper.getNewTempVar();
-        this.emit(`${byteVal} = load i8, i8* ${srcPtr}, align 1`);
-        this.emit(`store i8 ${byteVal}, i8* ${dstPtr}, align 1`);
-        const next = this.llvmHelper.getNewTempVar();
-        this.emit(`${next} = add i64 ${cur}, 1`);
-        this.emit(`store i64 ${next}, i64* ${idx}, align 8`);
-        this.emit(`br label %${cmp}`);
-
-        this.emit(`${exit}:`, false);
-        this.emit(`ret void`);
-        this.indentLevel--;
-        this.emit(`}`, false);
-        this.emit(``, false);
-
-        // heap init
-        this.emit(`define internal void @__heap_init() {`, false);
-        this.indentLevel++;
-        const initFlagHeap = this.llvmHelper.getNewTempVar();
-        this.emit(`${initFlagHeap} = load i1, i1* @__heap_initialized, align 1`);
-        const doneLbl = this.getNewLabel('heap.init.done');
-        const doLbl = this.getNewLabel('heap.init.do');
-        this.emit(`br i1 ${initFlagHeap}, label %${doneLbl}, label %${doLbl}`);
-        this.emit(`${doLbl}:`, false);
-        this.indentLevel++;
-        const curBrkInit = this.llvmHelper.getNewTempVar();
-        this.emit(`${curBrkInit} = call i64 @__syscall6(i64 12, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)`);
-        const curp = this.llvmHelper.getNewTempVar();
-        this.emit(`${curp} = inttoptr i64 ${curBrkInit} to i8*`);
-        this.emit(`store i8* ${curp}, i8** @__heap_base, align 8`);
-        this.emit(`store i8* ${curp}, i8** @__heap_brk, align 8`);
-        this.emit(`store i1 true, i1* @__heap_initialized, align 1`);
-        this.emit(`br label %${doneLbl}`);
-        this.indentLevel--;
-        this.emit(`${doneLbl}:`, false);
-        this.emit(`ret void`);
-        this.indentLevel--;
-        this.emit(`}`, false);
-        this.emit(``, false);
-
-        // malloc (simple bump)
-        this.emit(`define internal i8* @yulang_malloc(i64 %size) {`, false);
-        this.indentLevel++;
-        this.emit(`call void @__heap_init()`);
-        const aligned = this.llvmHelper.getNewTempVar();
-        this.emit(`${aligned} = add i64 %size, 7`);
-        const aligned2 = this.llvmHelper.getNewTempVar();
-        this.emit(`${aligned2} = and i64 ${aligned}, -8`);
-        const curbrkMalloc = this.llvmHelper.getNewTempVar();
-        this.emit(`${curbrkMalloc} = load i8*, i8** @__heap_brk, align 8`);
-        const nextbrk = this.llvmHelper.getNewTempVar();
-        this.emit(`${nextbrk} = getelementptr inbounds i8, i8* ${curbrkMalloc}, i64 ${aligned2}`);
-        const nextint = this.llvmHelper.getNewTempVar();
-        this.emit(`${nextint} = ptrtoint i8* ${nextbrk} to i64`);
-        const brkres = this.llvmHelper.getNewTempVar();
-        this.emit(`${brkres} = call i64 @__syscall6(i64 12, i64 ${nextint}, i64 0, i64 0, i64 0, i64 0, i64 0)`);
-        const brkptr = this.llvmHelper.getNewTempVar();
-        this.emit(`${brkptr} = inttoptr i64 ${brkres} to i8*`);
-        this.emit(`store i8* ${brkptr}, i8** @__heap_brk, align 8`);
-        this.emit(`ret i8* ${curbrkMalloc}`);
-        this.indentLevel--;
-        this.emit(`}`, false);
-        this.emit(``, false);
-
-        // free (only top-of-heap reclaim)
-        this.emit(`define internal void @yulang_free(i8* %ptr, i64 %size) {`, false);
-        this.indentLevel++;
-        const alignedF = this.llvmHelper.getNewTempVar();
-        this.emit(`${alignedF} = add i64 %size, 7`);
-        const aligned2F = this.llvmHelper.getNewTempVar();
-        this.emit(`${aligned2F} = and i64 ${alignedF}, -8`);
-        const curbrkF = this.llvmHelper.getNewTempVar();
-        this.emit(`${curbrkF} = load i8*, i8** @__heap_brk, align 8`);
-        const nextptrF = this.llvmHelper.getNewTempVar();
-        this.emit(`${nextptrF} = getelementptr inbounds i8, i8* %ptr, i64 ${aligned2F}`);
-        const istop = this.llvmHelper.getNewTempVar();
-        this.emit(`${istop} = icmp eq i8* ${nextptrF}, ${curbrkF}`);
-        const retEnd = this.getNewLabel('free.end');
-        const retTop = this.getNewLabel('free.top');
-        this.emit(`br i1 ${istop}, label %${retTop}, label %${retEnd}`);
-        this.emit(`${retTop}:`, false);
-        const ptrint = this.llvmHelper.getNewTempVar();
-        this.emit(`${ptrint} = ptrtoint i8* %ptr to i64`);
-        this.emit(`call i64 @__syscall6(i64 12, i64 ${ptrint}, i64 0, i64 0, i64 0, i64 0, i64 0)`);
-        this.emit(`store i8* %ptr, i8** @__heap_brk, align 8`);
-        this.emit(`br label %${retEnd}`);
-        this.emit(`${retEnd}:`, false);
-        this.emit(`ret void`);
-        this.indentLevel--;
-        this.emit(`}`, false);
-        this.emit(``, false);
+        this.platform.emitLowLevelRuntime(this);
     }
 
-    private ensureI64(irValue: IRValue): string {
+    public ensureI64(irValue: IRValue): string {
         if (irValue.type === 'i64') return irValue.value;
 
-        const tempVar = this.llvmHelper.getNewTempVar();
+        const resultVar = this.llvmHelper.getNewTempVar(); // Use one result var for all cases
+
         if (irValue.type === 'i32') {
-            this.emit(`${tempVar} = sext i32 ${irValue.value} to i64`);
-            return tempVar;
+            this.emit(`${resultVar} = sext i32 ${irValue.value} to i64`);
+            return resultVar;
         }
         if (irValue.type === 'i1') {
-            this.emit(`${tempVar} = zext i1 ${irValue.value} to i64`);
-            return tempVar;
+            this.emit(`${resultVar} = zext i1 ${irValue.value} to i64`);
+            return resultVar;
         }
         if (irValue.type.endsWith('*')) {
-            this.emit(`${tempVar} = ptrtoint ${irValue.type} ${irValue.value} to i64`);
-            return tempVar;
+            const ptrSize = this.platform.architecture.getPointerSizeInBits();
+            const ptrToIntTemp = this.llvmHelper.getNewTempVar();
+            this.emit(`${ptrToIntTemp} = ptrtoint ${irValue.type} ${irValue.value} to i${ptrSize}`);
+            
+            if (ptrSize === 64) {
+                return ptrToIntTemp; // Already i64 size, return the ptrtoint result
+            } else {
+                // If pointer size is less than 64-bit, extend it to i64
+                this.emit(`${resultVar} = sext i${ptrSize} ${ptrToIntTemp} to i64`);
+                return resultVar;
+            }
         }
 
-        throw new Error(`Cannot convert type ${irValue.type} to i64 for syscall.`);
+        throw new Error(`Cannot convert type ${irValue.type} to i64.`);
     }
 
     private getFunctionKey(decl: FunctionDeclaration): string {
@@ -694,47 +580,13 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const totalLen = this.llvmHelper.getNewTempVar();
         this.emit(`${totalLen} = add i64 ${leftLen}, ${rightLen}`);
 
-        // Allocate buffer via syscall brk bump allocator (no libc)
+        // Allocate buffer via platform's memory allocate
         const totalLenWithNull = this.llvmHelper.getNewTempVar();
         this.emit(`${totalLenWithNull} = add i64 ${totalLen}, 1`);
-        const sizeToAlloc = totalLenWithNull;
-        this.ensureHeapGlobals();
-
-        // Initialize heap brk if needed
-        const initFlag = this.llvmHelper.getNewTempVar();
-        this.emit(`${initFlag} = load i1, i1* @__heap_initialized, align 1`);
-        const isInitEnd = this.getNewLabel('heap.init.end');
-        const isInitDo = this.getNewLabel('heap.init.do');
-        this.emit(`br i1 ${initFlag}, label %${isInitEnd}, label %${isInitDo}`);
-
-        // init do block
-        this.emit(`${isInitDo}:`, false);
-        this.indentLevel++;
-        const currentBrk = this.llvmHelper.getNewTempVar();
-        this.emit(`${currentBrk} = call i64 @__syscall6(i64 12, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)`);
-        const currentBrkPtr = this.llvmHelper.getNewTempVar();
-        this.emit(`${currentBrkPtr} = inttoptr i64 ${currentBrk} to i8*`);
-        this.emit(`store i8* ${currentBrkPtr}, i8** @__heap_brk, align 8`);
-        this.emit(`store i1 true, i1* @__heap_initialized, align 1`);
-        this.emit(`br label %${isInitEnd}`);
-        this.indentLevel--;
-
-        // init end block
-        this.emit(`${isInitEnd}:`, false);
-
-        // Allocate
-        const oldBrk = this.llvmHelper.getNewTempVar();
-        this.emit(`${oldBrk} = load i8*, i8** @__heap_brk, align 8`);
-        const nextBrk = this.llvmHelper.getNewTempVar();
-        this.emit(`${nextBrk} = getelementptr inbounds i8, i8* ${oldBrk}, i64 ${sizeToAlloc}`);
-        const nextBrkInt = this.llvmHelper.getNewTempVar();
-        this.emit(`${nextBrkInt} = ptrtoint i8* ${nextBrk} to i64`);
-        const setBrkRes = this.llvmHelper.getNewTempVar();
-        this.emit(`${setBrkRes} = call i64 @__syscall6(i64 12, i64 ${nextBrkInt}, i64 0, i64 0, i64 0, i64 0, i64 0)`);
-        const setBrkPtr = this.llvmHelper.getNewTempVar();
-        this.emit(`${setBrkPtr} = inttoptr i64 ${setBrkRes} to i8*`);
-        this.emit(`store i8* ${setBrkPtr}, i8** @__heap_brk, align 8`);
-        const destPtr = oldBrk; // allocation start
+        const sizeToAlloc: IRValue = { value: totalLenWithNull, type: 'i64' };
+        
+        const allocResult = this.platform.emitMemoryAllocate(this, sizeToAlloc);
+        const destPtr = allocResult.value;
 
         // Copy left
         const leftDataPtrPtr = this.llvmHelper.getNewTempVar();
@@ -1174,20 +1026,13 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         // Special-case syscall intrinsic
         if (calleeInfo.type === 'internal_syscall' || calleeInfo.value === '__syscall6') {
             // syscall(number[, arg1..arg6]) -> i64
-            const syscallArgs: string[] = argValues.map(a => {
-                if (a.type.endsWith('*')) {
-                    const tempVar = this.llvmHelper.getNewTempVar();
-                    this.emit(`${tempVar} = ptrtoint ${a.type} ${a.value} to i64`);
-                    return tempVar;
-                }
-                return this.ensureI64(a);
-            });
-            while (syscallArgs.length < 7) syscallArgs.push('0');
-
-            const resultVar = this.llvmHelper.getNewTempVar();
-            const argList = syscallArgs.slice(0, 7).map(a => `i64 ${a}`).join(', ');
-            this.emit(`${resultVar} = call i64 @__syscall6(${argList})`);
-            return { value: resultVar, type: 'i64' };
+            // Delegates to the platform for actual syscall emission
+            const syscallNum = argValues[0];
+            if (!syscallNum) {
+                throw new Error("syscall intrinsic requires at least one argument for the syscall number.");
+            }
+            const argsForPlatform = argValues.slice(1);
+            return this.platform.emitSyscall(this, syscallNum, argsForPlatform);
         }
 
         // Inject implicit 'this' for method calls (if provided by GetExpr)
@@ -1719,7 +1564,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const destI8Ptr = this.llvmHelper.getNewTempVar();
                 const srcI8Ptr = this.llvmHelper.getNewTempVar();
 
-                this.emit(`${destI8Ptr} = bitcast ptr ${destPtr} to i8*`);
+                // 确定目标指针的LLVM类型，这里假设sretPointer已经是ptr类型
+                const sretPtrLlvmType = `ptr`; // 假设sretPointer已经是ptr类型
+                
+                this.emit(`${destI8Ptr} = bitcast ${sretPtrLlvmType} ${destPtr} to i8*`);
                 this.emit(`${srcI8Ptr} = bitcast ${retVal.type} ${srcPtr} to i8*`);
                 
                 const call = this.builtins.createMemcpy(destI8Ptr, srcI8Ptr, sizeOfStructI64);

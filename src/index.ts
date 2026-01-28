@@ -9,6 +9,8 @@ import { Lexer } from './lexer.js';
 import { Parser } from './parser/index.js';
 import { IRGenerator } from './generator/ir_generator.js';
 import { Stmt, AstPrinter, FunctionDeclaration, Parameter, TypeAnnotation, DeclareFunction, ClassDeclaration, StructDeclaration, PropertyDeclaration } from './ast.js';
+import { LinuxPlatform } from './platform/os/linux/LinuxPlatform.js';
+import { X86_64Architecture } from './platform/arch/x86_64/X86_64Architecture.js';
 
 const cli = cac('tsyuc');
 
@@ -124,8 +126,13 @@ cli
 
         // 3. IR Generation (only for exec or static-lib)
 
+        // NEW: Create platform and architecture instances
+        const architecture = new X86_64Architecture();
+        const platform = new LinuxPlatform(architecture);
+
         const mangleStdLib = (options.target === 'exec'); // Mangle for exec, not for static-lib
-        const irGenerator = new IRGenerator(parser, mangleStdLib, inputFilePath, options.debug); const llvmIr = irGenerator.generate(statements);
+        const irGenerator = new IRGenerator(platform, parser, mangleStdLib, inputFilePath, options.debug); 
+        const llvmIr = irGenerator.generate(statements);
         if (options.debug) {
           console.log("\n--- LLVM IR ---");
           console.log(llvmIr);

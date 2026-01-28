@@ -31,11 +31,11 @@ export class LLVMIRHelper {
 
     // TODO: Make these configurable or deduce from target environment
     public getTargetTriple(): string {
-        return "x86_64-pc-linux-gnu"; // Example: Adjust based on target OS/architecture
+        return this.generator.platform.architecture.getTargetTriple();
     }
 
     public getDataLayout(): string {
-        return "e-m:e-i64:64-f80:128-n8:16:32:64-S128"; // Example: Adjust based on target architecture
+        return this.generator.platform.architecture.getDataLayout();
     }
 
     public getNewTempVar(): string {
