@@ -1,38 +1,75 @@
 import { IRGenerator, type IRValue } from "../../../generator/ir_generator.js";
-import type { IArchitecture } from "../../IArchitecture.js";
+
 import type { IPlatform } from "../../IPlatform.js";
-import { LangItems } from "../../../generator/lang_items.js";
 
-export class LinuxPlatform implements IPlatform {
-    architecture: IArchitecture;
 
-    constructor(arch: IArchitecture) {
-        this.architecture = arch;
+// X86_64LinuxPlatform 实现了 IPlatform 接口，并封装了 x86_64 架构在 Linux 操作系统上的特性。
+export class X86_64LinuxPlatform implements IPlatform {
+    constructor() {
+    }
+
+    getTargetTriple(): string {
+        return "x86_64-unknown-linux-gnu"; // 标准 Linux x86-64 三元组
+    }
+
+    getDataLayout(): string {
+        return "e-m:e-i64:64-f80:128-n8:16:32:64-S128"; // 常见 x86-64 Linux 数据布局
+    }
+
+    emitSyscallInlineASM(generator: IRGenerator, callNum: string, args: string[]): string {
+        // x86-64 Linux 系统调用参数寄存器: RDI, RSI, RDX, R10, R8, R9
+        // 系统调用号放入 RAX
+        // 返回值在 RAX
+
+        // 输出约束: "={rax}" 用于返回值
+        // 输入约束: "0" 用于系统调用号 (RAX), "{rdi}", "{rsi}", 等用于参数
+        // Clobbers: "~{rcx}", "~{r11}", "~{memory}"
+
+        const argRegisters = ["{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"];
+        let asmInputs = [callNum, ...args];
+        let inputConstraints = ["0"]; // RAX 中的系统调用号 (第0个输入)
+
+        for (let i = 0; i < args.length && i < argRegisters.length; i++) {
+            inputConstraints.push(argRegisters[i] as string);
+        }
+
+        // 如果提供的参数少于 6 个，用 0 填充
+        while (asmInputs.length < 7) { // 1 个系统调用号 + 6 个参数
+            asmInputs.push("i64 0"); // 用哑 i64 0 填充
+            inputConstraints.push(""); // 哑参数没有特定的寄存器约束
+        }
+        
+        const outputConstraint = "={rax}"; // 返回值放入 RAX
+        const clobbers = "~{rcx},~{r11},~{memory}"; // 标准系统调用 clobbers
+        
+        const constraints = `"${outputConstraint},${inputConstraints.slice(0, 7).join(',')},${clobbers}"`;
+        const operands = asmInputs.slice(0, 7).map(arg => `i64 ${arg}`).join(', ');
+
+        // 实际的 ASM 指令就是 "syscall"
+        return `call i64 asm sideeffect "syscall", ${constraints}(${operands})`;
     }
 
     emitSyscall(generator: IRGenerator, callNum: IRValue, args: IRValue[]): IRValue {
-        // Prepare arguments for architecture-specific inline ASM
+        // 为架构特定的内联汇编准备参数
         const syscallArgs: string[] = args.map(a => {
-            // Ensure all arguments are i64 for syscalls, converting pointers to i64
+            // 确保所有参数都是 i64 用于系统调用，将指针转换为 i64
             if (a.type.endsWith('*')) {
                 const tempVar = generator.llvmHelper.getNewTempVar();
                 generator.emit(`${tempVar} = ptrtoint ${a.type} ${a.value} to i64`);
                 return tempVar;
             }
-            // For now, assume other integer types are coerced to i64 by generator.ensureI64
-            // but for the inline asm, we need the actual i64 value.
-            // This part needs careful handling, for simplicity now, assume they are i64 or can be directly used.
-            // A more robust solution would be to call a helper that ensures i64 and returns the variable name.
-            // For now, let's just pass the value directly and let the architecture handle i64 conversion if needed.
+            // 假设其他整数类型会被 generator.ensureI64 强制转换为 i64
+            // 但对于内联汇编，我们需要实际的 i64 值。
+            // 暂时直接传递值，让架构在需要时处理 i64 转换。
             return a.value;
         });
         
-        // Pad with 0s if fewer than 6 arguments are provided
+        // 如果提供的参数少于 6 个，用 0 填充
         while (syscallArgs.length < 6) syscallArgs.push("0");
 
         const resultVar = generator.llvmHelper.getNewTempVar();
-        const callNumVal = generator.ensureI64(callNum); // Ensure syscall number is i64
-        const asmCall = this.architecture.emitSyscallInlineASM(generator, callNumVal, syscallArgs);
+        const callNumVal = generator.ensureI64(callNum); // 确保系统调用号是 i64
+        const asmCall = this.emitSyscallInlineASM(generator, callNumVal, syscallArgs);
 
         generator.emit(`${resultVar} = ${asmCall}`);
         return { value: resultVar, type: 'i64' };
@@ -47,9 +84,9 @@ export class LinuxPlatform implements IPlatform {
 
         // 获取对齐后的 size
         const alignedSize = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${this.architecture.getPointerAlignmentInBytes() - 1}`);
+        generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${this.getPointerAlignmentInBytes() - 1}`);
         const alignedSize2 = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-this.architecture.getPointerAlignmentInBytes()}`);
+        generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-this.getPointerAlignmentInBytes()}`);
 
         const currentBrk = generator.llvmHelper.getNewTempVar();
         generator.emit(`${currentBrk} = load i8*, i8** @__heap_brk, align 8`);
@@ -85,9 +122,9 @@ export class LinuxPlatform implements IPlatform {
 
         // 获取对齐后的 size
         const alignedSize = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${this.architecture.getPointerAlignmentInBytes() - 1}`);
+        generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${this.getPointerAlignmentInBytes() - 1}`);
         const alignedSize2 = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-this.architecture.getPointerAlignmentInBytes()}`);
+        generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-this.getPointerAlignmentInBytes()}`);
 
 
         const currentBrk = generator.llvmHelper.getNewTempVar();
@@ -122,7 +159,7 @@ export class LinuxPlatform implements IPlatform {
     }
 
     emitLowLevelRuntime(generator: IRGenerator): void {
-        // Internal heap init function
+        // 内部堆初始化函数
         generator.emit(`define internal void @__heap_init_internal() {`, false);
         generator.indentLevel++;
         const initFlagHeap = generator.llvmHelper.getNewTempVar();
@@ -132,13 +169,12 @@ export class LinuxPlatform implements IPlatform {
         generator.emit(`br i1 ${initFlagHeap}, label %${doneLbl}, label %${doLbl}`);
         generator.emit(`${doLbl}:`, false);
         generator.indentLevel++;
-        // const currentBrkInit = generator.llvmHelper.getNewTempVar(); // 移除这行
         
-        // Perform brk syscall (12) to get current program break
+        // 执行 brk 系统调用 (12) 以获取当前程序中断点
         const brkCallNum = { value: '12', type: 'i64' };
-        const brkArgs = [{ value: '0', type: 'i64' }]; // Argument 0 for brk means get current break
+        const brkArgs = [{ value: '0', type: 'i64' }]; // 参数 0 表示获取当前中断点
         const brkSyscallResult = this.emitSyscall(generator, brkCallNum, brkArgs);
-        const currentBrkValue = brkSyscallResult.value; // 直接使用结果变量
+        const currentBrkValue = brkSyscallResult.value;
         
         const currentBrkPtr = generator.llvmHelper.getNewTempVar();
         generator.emit(`${currentBrkPtr} = inttoptr i64 ${currentBrkValue} to i8*`);
@@ -153,10 +189,10 @@ export class LinuxPlatform implements IPlatform {
         generator.emit(`}`, false);
         generator.emit(``, false);
 
-        // Internal malloc function, renamed to yulang_malloc for external linkage
+        // 内部 malloc 函数，重命名为 yulang_malloc 以便外部链接
         generator.emit(`define internal i8* @yulang_malloc(i64 %size) {`, false);
         generator.indentLevel++;
-        // Ensure heap is initialized before allocating
+        // 在分配内存之前确保堆已初始化
         generator.emit(`call void @__heap_init_internal()`);
         const allocRes = this.emitMemoryAllocate(generator, { value: '%size', type: 'i64' });
         generator.emit(`ret i8* ${allocRes.value}`);
@@ -164,7 +200,7 @@ export class LinuxPlatform implements IPlatform {
         generator.emit(`}`, false);
         generator.emit(``, false);
 
-        // memcpy inline implementation (byte loop) - moved from IRGenerator
+        // memcpy 内联实现 (字节循环)
         generator.emit(`define internal void @__memcpy_inline(i8* %dst, i8* %src, i64 %len) {`, false);
         generator.indentLevel++;
         const cmp = generator.getNewLabel('memcpy.cmp');
@@ -201,11 +237,11 @@ export class LinuxPlatform implements IPlatform {
         generator.emit(`}`, false);
         generator.emit(``, false);
 
-        // Define syscall wrapper: __syscall6(n, a1..a6)
+        // 定义 syscall 包装器: __syscall6(n, a1..a6)
         generator.emit(`define internal i64 @__syscall6(i64 %n, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {`, false);
         generator.indentLevel++;
         const res = generator.llvmHelper.getNewTempVar();
-        const asmCall = this.architecture.emitSyscallInlineASM(generator, '%n', ['%a1', '%a2', '%a3', '%a4', '%a5', '%a6']);
+        const asmCall = this.emitSyscallInlineASM(generator, '%n', ['%a1', '%a2', '%a3', '%a4', '%a5', '%a6']);
         generator.emit(`${res} = ${asmCall}`);
         generator.emit(`ret i64 ${res}`);
         generator.indentLevel--;
@@ -214,13 +250,33 @@ export class LinuxPlatform implements IPlatform {
     }
 
     emitGlobalDefinitions(generator: IRGenerator): void {
-        // Free list struct definition (needed for @__free_list)
+        // 空闲列表结构定义 (用于 @__free_list)
         generator.emit(`%struct.free_node = type { i64, i8* }`, false);
 
-        // Global heap-related variables
+        // 全局堆相关变量
         generator.emit(`@__heap_base = internal global i8* null, align 8`, false);
         generator.emit(`@__heap_brk = internal global i8* null, align 8`, false);
         generator.emit(`@__heap_initialized = internal global i1 false, align 1`, false);
         generator.emit(`@__free_list = internal global %struct.free_node* null, align 8`, false);
+    }
+
+    // 获取指针大小 (比特)
+    getPointerSizeInBits(): number {
+        return 64; // x86-64 是 64 位架构
+    }
+
+    // 获取指针对齐方式 (字节)
+    getPointerAlignmentInBytes(): number {
+        return 8; // 指针在 x86-64 上通常是 8 字节对齐
+    }
+
+    // 获取操作系统标识符
+    getOsIdentifier(): string {
+        return "linux";
+    }
+
+    // 获取架构标识符
+    getArchIdentifier(): string {
+        return "x86_64";
     }
 }

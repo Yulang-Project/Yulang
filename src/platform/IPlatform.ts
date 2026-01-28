@@ -1,9 +1,8 @@
 import { IRGenerator, type IRValue } from "../generator/ir_generator.js";
-import type { IArchitecture } from "./IArchitecture.js";
+
 
 export interface IPlatform {
-    // Associated architecture
-    architecture: IArchitecture;
+
 
     // Emits the LLVM IR for performing a system call.
     // The platform implementation will typically use architecture.emitSyscallInlineASM().
@@ -20,4 +19,19 @@ export interface IPlatform {
 
     // Emits LLVM global definitions needed for the platform (e.g., __heap_base, __heap_brk).
     emitGlobalDefinitions(generator: IRGenerator): void;
+
+    // Gets the operating system identifier for this platform (e.g., "linux")
+    getOsIdentifier(): string;
+
+    // Gets the architecture identifier for this platform (e.g., "x86_64")
+    getArchIdentifier(): string;
+
+    // LLVM target triple for this platform (e.g., "x86_64-unknown-linux-gnu")
+    getTargetTriple(): string;
+
+    // LLVM datalayout string for this platform
+    getDataLayout(): string;
+
+    // Gets the size of a pointer in bits (e.g., 64 for x86_64)
+    getPointerSizeInBits(): number;
 }

@@ -234,8 +234,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.debug = debug; // Initialize new debug flag
         this.builtins = new BuiltinFunctions(this.llvmHelper);
         this.llvmHelper.setGenerator(this); // Set back-reference for helpers
-        this.emit(`target triple = "${this.platform.architecture.getTargetTriple()}"`, false);
-        this.emit(`target datalayout = "${this.platform.architecture.getDataLayout()}"`, false);
+        this.emit(`target triple = "${this.platform.getTargetTriple()}"`, false);
+        this.emit(`target datalayout = "${this.platform.getDataLayout()}"`, false);
         this.emitLangItemStructs();
         this.emitLowLevelRuntime();
         this.emitHeapGlobals();
@@ -380,7 +380,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             return resultVar;
         }
         if (irValue.type.endsWith('*')) {
-            const ptrSize = this.platform.architecture.getPointerSizeInBits();
+            const ptrSize = this.platform.getPointerSizeInBits();
             const ptrToIntTemp = this.llvmHelper.getNewTempVar(); // This is just a temporary for the ptrtoint result
             this.emit(`${ptrToIntTemp} = ptrtoint ${irValue.type} ${irValue.value} to i${ptrSize}`);
 

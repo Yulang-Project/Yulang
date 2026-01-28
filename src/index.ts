@@ -10,8 +10,10 @@ import { Parser } from './parser/index.js';
 import { IRGenerator } from './generator/ir_generator.js';
 import { Stmt, AstPrinter, FunctionDeclaration, Parameter, TypeAnnotation, DeclareFunction, ClassDeclaration, StructDeclaration, PropertyDeclaration } from './ast.js';
 import { ProjectFinder } from './Finder.js';
-import { LinuxPlatform } from './platform/os/linux/LinuxPlatform.js';
-import { X86_64Architecture } from './platform/arch/x86_64/X86_64Architecture.js';
+import { X86_64LinuxPlatform } from './platform/os/linux/X86_64LinuxPlatform.js';
+import { ARM64LinuxPlatform } from './platform/os/linux/ARM64LinuxPlatform.js';
+
+
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -27,11 +29,26 @@ cli
   .option('--output <path>', 'Output file path', { default: './a.out' })
   .option('--debug', 'Enable debug output (tokens, AST, IR)', { default: false })
   .option('--target <type>', 'Compilation target type: exec (executable), static-lib (static library), declare-file (declaration file), or asm (assembly file)', { default: 'exec' })
+  .option('--platform <name>', 'Target platform (e.g., "x86_64-linux", "arm64-linux")', { default: 'x86_64-linux' })
   .action(async (filePath, options) => {
     const inputFilePath = path.resolve(filePath);
     const outputFilePath = path.resolve(options.output);
     const outputDir = path.dirname(outputFilePath);
     const outputFileName = path.basename(outputFilePath);
+
+    // NEW: Create platform instance based on --platform option
+    let platform;
+    switch (options.platform) {
+        case 'x86_64-linux':
+            platform = new X86_64LinuxPlatform();
+            break;
+        case 'arm64-linux':
+            platform = new ARM64LinuxPlatform();
+            break;
+        default:
+            console.error(`Error: Unknown platform: ${options.platform}`);
+            process.exit(1);
+    }
 
     if (!fs.existsSync(inputFilePath)) {
       console.error(`Error: Input file not found: ${inputFilePath}`);
@@ -59,8 +76,8 @@ cli
       // NEW: Create finder for parsing
       const projectRoot = path.resolve(__dirname, '..'); // Assuming index.ts is in dist/
       const finder = new ProjectFinder(projectRoot);
-      const osIdentifier = "linux"; // TODO: Make this dynamic
-      const archIdentifier = "x86_64"; // TODO: Make this dynamic
+      const osIdentifier = platform.getOsIdentifier();
+      const archIdentifier = platform.getArchIdentifier();
       const parser = new Parser(tokens, finder, osIdentifier, archIdentifier, inputFilePath);
       const statements: Stmt[] = parser.parse();
       if (options.debug) {
@@ -139,9 +156,7 @@ cli
 
         // 3. IR Generation (only for exec or static-lib)
 
-        // NEW: Create platform and architecture instances
-        const architecture = new X86_64Architecture();
-        const platform = new LinuxPlatform(architecture);
+
 
         const mangleStdLib = (options.target === 'exec'); // Mangle for exec, not for static-lib
         const irGenerator = new IRGenerator(platform, parser, mangleStdLib, inputFilePath, options.debug); 

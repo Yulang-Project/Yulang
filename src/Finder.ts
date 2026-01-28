@@ -49,6 +49,8 @@ export class ProjectFinder implements IFinder {
         // 根据 OS 和 Arch 提供硬编码的动态链接器路径
         if (osIdentifier === 'linux' && archIdentifier === 'x86_64') {
             return '/lib64/ld-linux-x86-64.so.2';
+        } else if (osIdentifier === 'linux' && archIdentifier === 'arm64') {
+            return '/lib/ld-linux-aarch64.so.1';
         }
         // TODO: Add other OS/Arch combinations
         throw new Error(`Unsupported dynamic linker for ${osIdentifier}-${archIdentifier}`);
@@ -59,6 +61,8 @@ export class ProjectFinder implements IFinder {
         // 根据 OS 和 Arch 提供硬编码的链接器标志
         if (osIdentifier === 'linux' && archIdentifier === 'x86_64') {
             return ['-m', 'elf_x86_64', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'];
+        } else if (osIdentifier === 'linux' && archIdentifier === 'arm64') {
+            return ['-m', 'elf_aarch64', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'];
         }
         // TODO: Add other OS/Arch combinations
         return [];
