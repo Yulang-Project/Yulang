@@ -10,8 +10,8 @@ import { Parser } from './parser/index.js';
 import { IRGenerator } from './generator/ir_generator.js';
 import { Stmt, AstPrinter, FunctionDeclaration, Parameter, TypeAnnotation, DeclareFunction, ClassDeclaration, StructDeclaration, PropertyDeclaration } from './ast.js';
 import { ProjectFinder } from './Finder.js';
-import { X86_64LinuxPlatform } from './platform/os/linux/X86_64LinuxPlatform.js';
-import { ARM64LinuxPlatform } from './platform/os/linux/ARM64LinuxPlatform.js';
+import { X86_64LinuxPlatform } from './platform/os/linux/x86_64/index.js';
+import { ARM64LinuxPlatform } from './platform/os/linux/arm64/index.js';
 
 
 import { fileURLToPath } from 'url';
@@ -189,8 +189,9 @@ cli
             const bootstrapPath = finder.getBootstrapPath(osIdentifier, archIdentifier);
             const dynamicLinker = finder.getLinkerDynamicLinker(osIdentifier, archIdentifier);
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
-            console.log(`  [CMD] ld -o ${outputFilePath} ${bootstrapPath} ${objPath} -dynamic-linker ${dynamicLinker} ${linkerFlags.join(' ')}`);
-            execFileSync('ld', ['-o', outputFilePath, bootstrapPath, objPath, '-dynamic-linker', dynamicLinker, ...linkerFlags], { stdio: 'inherit' });
+            const linkerCommand = platform.getArchIdentifier() === 'arm64' ? 'aarch64-linux-gnu-ld' : 'ld';
+            console.log(`  [CMD] ${linkerCommand} -o ${outputFilePath} ${bootstrapPath} ${objPath} -dynamic-linker ${dynamicLinker} ${linkerFlags.join(' ')}`);
+            execFileSync(linkerCommand, ['-o', outputFilePath, bootstrapPath, objPath, '-dynamic-linker', dynamicLinker, ...linkerFlags], { stdio: 'inherit' });
           } else if (options.target === 'static-lib') {
             // 5. Create static library (.a)
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);

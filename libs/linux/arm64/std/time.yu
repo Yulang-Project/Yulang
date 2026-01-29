@@ -1,0 +1,38 @@
+// std/time
+
+struct timespec {
+    tv_sec: i64;
+    tv_nsec: i64;
+}
+
+// std/time
+export fun sleep_ms(ms: i64): i64 {
+    // poll(fds_ptr, nfds, timeout)
+    // syscall 7: 第一个参数传 0 (null)，第二个传 0，第三个传毫秒数
+    // 内核会在这里挂起进程，直到超时。它不会发送杀掉进程的信号！
+    return syscall(7, 0, 0, ms, 0, 0, 0);
+}
+
+export fun sleep(seconds: i64): i64 {
+    return sleep_ms(seconds * 1000);
+}
+
+// 返回当前的 Unix 时间戳（秒）
+export fun now(): i64 {
+    // syscall 201: time(tloc_ptr)
+    // 传 0 进去，内核会直接通过寄存器返回秒数，完全不需要处理内存布局！
+    return syscall(201, 0, 0, 0, 0, 0, 0);
+}
+
+export fun format_hms(total_seconds: i64): string {
+    let s: i64 = total_seconds % 60;
+    let m: i64 = (total_seconds / 60) % 60;
+    let h: i64 = (total_seconds / 3600) % 24;
+    return toString(h) + ":" + toString(m) + ":" + toString(s);
+}
+
+export fun gmt(): string {
+    // 格式化 GMT 时间
+    let now: i64 = now();
+    return format_hms(now);
+}

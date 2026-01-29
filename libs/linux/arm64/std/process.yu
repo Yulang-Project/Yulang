@@ -1,0 +1,63 @@
+// 获取当前进程的 PID
+export fun getpid(): i64 {
+  // getpid 不需要参数
+  return syscall(39, 0, 0, 0, 0, 0, 0);
+}
+
+// 获取父进程的 PID
+export fun getppid(): i64 {
+  return syscall(110, 0, 0, 0, 0, 0, 0);
+}
+
+// 创建子进程
+export fun fork(): i64 {
+  // 返回值：子进程中为 0，父进程中为子进程 PID
+  return syscall(57, 0, 0, 0, 0, 0, 0);
+}
+
+// 向指定进程发送信号
+// pid: 目标进程 ID
+// sig: 信号编号（例如 9 是 SIGKILL, 15 是 SIGTERM）
+export fun kill(pid: i64, sig: i64): i64 {
+  if (pid > 0) {
+    // syscall 62: sys_kill(pid, sig)
+    return syscall(62, pid, sig, 0, 0, 0, 0);
+  }
+  return -1;
+}
+
+// 退出当前进程
+// code: 退出状态码（通常 0 表示成功）
+export fun exit(code: i64): void {
+  syscall(60, code, 0, 0, 0, 0, 0);
+}
+
+// 简单的等待子进程结束
+// pid: 指定子进程 PID（-1 表示等待任意子进程）
+export fun wait(pid: i64): i64 {
+  // syscall 61: sys_wait4(pid, stat_addr, options, usage)
+  // 这里简化处理，不提取具体的 status，只返回结束的 PID
+  return syscall(61, pid, 0, 0, 0, 0, 0);
+}
+
+// 获取当前进程的工作目录
+export fun getcwd(): string {
+  let max_path: i64 = 4096; // Linux 默认最大路径长度
+  let buf = _builtin_alloc(max_path);
+  
+  // syscall 79: sys_getcwd(buf, size)
+  let len: i64 = syscall(79, buf as i64, max_path, 0, 0, 0, 0);
+  
+  if (len < 0) {
+    return "";
+  }
+  
+  return _builtin_create_string(buf, len - 1); // 减 1 去掉最后的 null 终止符
+}
+
+// 切换当前工作目录
+export fun chdir(path: string): i64 {
+  let path_ptr: i64 = _builtin_string_to_ptr(path) as i64;
+  // syscall 80: sys_chdir(path)
+  return syscall(80, path_ptr, 0, 0, 0, 0, 0);
+}

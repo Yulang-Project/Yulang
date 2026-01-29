@@ -62,7 +62,7 @@ export class ProjectFinder implements IFinder {
         if (osIdentifier === 'linux' && archIdentifier === 'x86_64') {
             return ['-m', 'elf_x86_64', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'];
         } else if (osIdentifier === 'linux' && archIdentifier === 'arm64') {
-            return ['-m', 'elf_aarch64', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'];
+            return ['-m', 'aarch64linux', '--eh-frame-hdr', '-pie', '-z', 'relro', '-z', 'now'];
         }
         // TODO: Add other OS/Arch combinations
         return [];

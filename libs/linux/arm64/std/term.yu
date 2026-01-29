@@ -1,0 +1,60 @@
+#import "std/io" as io;
+
+// --- 颜色控制 ---
+
+// 前景色（文字颜色）
+export fun fg_black()   { io.print("\x1b[30m"); }
+export fun fg_red()     { io.print("\x1b[31m"); }
+export fun fg_green()   { io.print("\x1b[32m"); }
+export fun fg_yellow()  { io.print("\x1b[33m"); }
+export fun fg_blue()    { io.print("\x1b[34m"); }
+export fun fg_magenta() { io.print("\x1b[35m"); }
+export fun fg_cyan()    { io.print("\x1b[36m"); }
+export fun fg_white()   { io.print("\x1b[37m"); }
+
+// 背景色
+export fun bg_black()   { io.print("\x1b[40m"); }
+export fun bg_red()     { io.print("\x1b[41m"); }
+export fun bg_green()   { io.print("\x1b[42m"); }
+export fun bg_yellow()  { io.print("\x1b[43m"); }
+export fun bg_blue()    { io.print("\x1b[44m"); }
+export fun bg_magenta() { io.print("\x1b[45m"); }
+export fun bg_cyan()    { io.print("\x1b[46m"); }
+export fun bg_white()   { io.print("\x1b[47m"); }
+
+// 样式
+export fun bold()       { io.print("\x1b[1m"); }    // 粗体
+export fun underline()  { io.print("\x1b[4m"); } // 下划线
+export fun inverse()    { io.print("\x1b[7m"); }    // 前背景色反转
+
+// 重置所有样式
+export fun reset()      { io.print("\x1b[0m"); }
+
+// --- 光标控制 ---
+
+// 清屏并移动光标到左上角 (1,1)
+export fun clear() {
+    io.print("\x1b[2J"); // 清除整个屏幕
+    io.print("\x1b[H");  // 移动光标到 (1,1)
+}
+
+// 移动光标到指定行和列 (1-based index)
+export fun move_cursor(row: i64, col: i64) {
+    io.print("\x1b[");
+    io.print(toString(row));
+    io.print(";");
+    io.print(toString(col));
+    io.print("H");
+}
+
+// 保存当前光标位置
+export fun save_cursor() { io.print("\x1b[s"); }
+
+// 恢复之前保存的光标位置
+export fun restore_cursor() { io.print("\x1b[u"); }
+
+// 隐藏光标
+export fun hide_cursor() { io.print("\x1b[?25l"); }
+
+// 显示光标
+export fun show_cursor() { io.print("\x1b[?25h"); }

@@ -1,0 +1,48 @@
+// std/net
+
+// 严格按照 Linux 要求的 16 字节布局定义
+struct sockaddr_in {
+    sin_family: i16;   // 偏移 0: 协议族 (AF_INET = 2)
+    sin_port: i16;     // 偏移 2: 端口 (大端序)
+    sin_addr: i32;     // 偏移 4: IP 地址 (0 代表 0.0.0.0)
+    sin_zero: i64;     // 偏移 8: 填充 8 字节的 0
+}
+
+// 核心工具：主机字节序转网络字节序 (小端转大端)
+// 比如 8080 (0x1F90) 必须转成 0x901F
+export fun htons(port: i16): i16 {
+    let p: i16 = port; 
+    return ((p & 0xFF) << 8) | ((p >> 8) & 0xFF);
+}
+
+// 创建并监听
+export fun listen(port: i64): i64 {
+    // 1. socket(AF_INET, SOCK_STREAM, 0) -> Syscall 41
+    let fd = syscall(41, 2, 1, 0, 0, 0, 0);
+    if (fd < 0) { return fd; }
+
+    // 2. 使用你的新语法初始化结构体
+    let addr: sockaddr_in = {
+        sin_family: 2,           // AF_INET
+        sin_port: htons(port),   // 端口转换
+        sin_addr: 0,             // 监听所有网卡 (INADDR_ANY)
+        sin_zero: 0              // 必须填充 0
+    };
+
+    // 3. bind(fd, &addr, 16) -> Syscall 49
+    // 这里如果 &addr 拿到的是纯净的数据首地址，就成了！
+    let b_res = syscall(49, fd, &addr, 16, 0, 0, 0);
+    if (b_res < 0) { return b_res; }
+
+    // 4. listen(fd, 128) -> Syscall 50
+    let l_res = syscall(50, fd, 128, 0, 0, 0, 0);
+    if (l_res < 0) { return l_res; }
+
+    return fd;
+}
+
+// 接收连接 -> Syscall 43
+export fun accept(server_fd: i64): i64 {
+    // 暂时忽略客户端信息，直接传 0
+    return syscall(43, server_fd, 0, 0, 0, 0, 0);
+}
