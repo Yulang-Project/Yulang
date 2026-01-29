@@ -6,8 +6,7 @@
   "bin": "dist/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc",
-    "build:asm": "mkdir -p dist/libs/standard && as src/libs/standard/bootstrap.s -o dist/libs/standard/bootstrap.o"
+    "build": "tsc"
   },
   "keywords": [],
   "author": "",
