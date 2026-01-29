@@ -6,10 +6,10 @@ let MAP_ANONYMOUS: i64 = 32; // 匿名映射（不关联文件，只拿内存）
 // 简单的内存分配函数
 // size: 想要申请的字节数
 export fun alloc(size: i64): i64 {
-  // syscall(9, addr, len, prot, flags, fd, offset)
+  // syscall(222, addr, len, prot, flags, fd, offset)
   // 我们组合使用 PROT_READ | PROT_WRITE (1 | 2 = 3)
   // 使用 MAP_PRIVATE | MAP_ANONYMOUS (2 | 32 = 34)
-  let addr: i64 = syscall(9, 0, size, 3, 34, -1, 0);
+  let addr: i64 = syscall(222, 0, size, 3, 34, -1, 0);
   
   // Linux 失败时会返回一个负值（通常在 -4095 到 -1 之间）
   return addr;
@@ -19,6 +19,6 @@ export fun alloc(size: i64): i64 {
 // addr: 之前申请到的地址
 // size: 当初申请的大小
 export fun free(addr: i64, size: i64): i64 {
-  // syscall 11: munmap(addr, len)
-  return syscall(11, addr, size, 0, 0, 0, 0);
+  // syscall 215: munmap(addr, len)
+  return syscall(215, addr, size, 0, 0, 0, 0);
 }

@@ -17,7 +17,7 @@ export fun htons(port: i16): i16 {
 
 // 创建并监听
 export fun listen(port: i64): i64 {
-    // 1. socket(AF_INET, SOCK_STREAM, 0) -> Syscall 41
+    // 1. socket(AF_INET, SOCK_STREAM, 0) -> Syscall 41 (ARM64)
     let fd = syscall(41, 2, 1, 0, 0, 0, 0);
     if (fd < 0) { return fd; }
 
@@ -29,20 +29,20 @@ export fun listen(port: i64): i64 {
         sin_zero: 0              // 必须填充 0
     };
 
-    // 3. bind(fd, &addr, 16) -> Syscall 49
+    // 3. bind(fd, &addr, 16) -> Syscall 42 (ARM64)
     // 这里如果 &addr 拿到的是纯净的数据首地址，就成了！
-    let b_res = syscall(49, fd, &addr, 16, 0, 0, 0);
+    let b_res = syscall(42, fd, &addr, 16, 0, 0, 0);
     if (b_res < 0) { return b_res; }
 
-    // 4. listen(fd, 128) -> Syscall 50
-    let l_res = syscall(50, fd, 128, 0, 0, 0, 0);
+    // 4. listen(fd, 128) -> Syscall 43 (ARM64)
+    let l_res = syscall(43, fd, 128, 0, 0, 0, 0);
     if (l_res < 0) { return l_res; }
 
     return fd;
 }
 
-// 接收连接 -> Syscall 43
+// 接收连接 -> Syscall 44 (ARM64)
 export fun accept(server_fd: i64): i64 {
     // 暂时忽略客户端信息，直接传 0
-    return syscall(43, server_fd, 0, 0, 0, 0, 0);
+    return syscall(44, server_fd, 0, 0, 0, 0, 0);
 }
