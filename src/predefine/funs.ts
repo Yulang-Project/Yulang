@@ -386,6 +386,235 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
         }
     },
     {
+        name: '_builtin_array_set',
+        handler: (generator, args) => {
+            if (args.length !== 3) {
+                throw new Error("_builtin_array_set requires exactly three arguments: array_ptr, index (i64), and element_value.");
+            }
+            const arrayPtrValue = args[0]!;
+            const indexValue = args[1]!;
+            const elementValue = args[2]!;
+
+            if (!arrayPtrValue.type.startsWith(LangItems.array.structPrefix) || !arrayPtrValue.type.endsWith('*')) {
+                throw new Error("_builtin_array_set expects a pointer to an array struct as the first argument.");
+            }
+            if (indexValue.type !== 'i64') {
+                throw new Error("_builtin_array_set expects an i64 index as the second argument.");
+            }
+
+            const arrayStructType = arrayPtrValue.type.slice(0, -1);
+            let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
+            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('pointer.')) {
+                elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
+            }
+            const elementPtrType = generator.llvmHelper.getPointerType(elementTypeLlvmType);
+            const h = generator.llvmHelper;
+
+            // Load array's ptr and len
+            const ptrPtr = h.getNewTempVar();
+            generator.emit(`${ptrPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.ptr.index}`);
+            const dataPtr = h.getNewTempVar();
+            generator.emit(`${dataPtr} = load ${elementPtrType}, ${elementPtrType}* ${ptrPtr}, align 8`);
+
+            const lenPtr = h.getNewTempVar();
+            generator.emit(`${lenPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.len.index}`);
+            const currentLen = h.getNewTempVar();
+            generator.emit(`${currentLen} = load i64, i64* ${lenPtr}, align 8`);
+
+            // Bounds check (index < len)
+            const outOfBoundsCond = h.getNewTempVar();
+            generator.emit(`${outOfBoundsCond} = icmp uge i64 ${indexValue.value}, ${currentLen}`);
+            const inBoundsLabel = generator.getNewLabel('array.set.inbounds');
+            const outOfBoundsLabel = generator.getNewLabel('array.set.oob');
+            generator.emit(`br i1 ${outOfBoundsCond}, label %${outOfBoundsLabel}, label %${inBoundsLabel}`);
+
+            generator.emit(`${outOfBoundsLabel}:`, false);
+            generator.emit(`call void @__panic_oob()`); // Call a panic function for out-of-bounds access
+            generator.emit(`unreachable`);
+            
+            generator.emit(`${inBoundsLabel}:`, false);
+            // Get element address
+            const elementAddr = h.getNewTempVar();
+            generator.emit(`${elementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${dataPtr}, i64 ${indexValue.value}`);
+            
+            // Store element value
+            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${elementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
+
+            return { value: '', type: 'void' }; // Set operations typically return void
+        }
+    },
+    {
+        name: '_builtin_array_append',
+        handler: (generator, args) => {
+            const arrayPtrValue = args[0]!;
+            const elementValue = args[1]!;
+
+            if (!arrayPtrValue || !arrayPtrValue.type.startsWith(LangItems.array.structPrefix) || !arrayPtrValue.type.endsWith('*')) {
+                throw new Error("_builtin_array_append expects a pointer to an array struct as the first argument.");
+            }
+            if (!elementValue) {
+                throw new Error("_builtin_array_append expects an element value as the second argument.");
+            }
+
+            const arrayStructType = arrayPtrValue.type.slice(0, -1);
+            let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
+            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('pointer.')) {
+                elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
+            }
+            const elementPtrType = generator.llvmHelper.getPointerType(elementTypeLlvmType);
+            const elementSize = generator.llvmHelper.sizeOf(elementTypeLlvmType);
+            const h = generator.llvmHelper;
+
+            const ptrPtr = h.getNewTempVar();
+            generator.emit(`${ptrPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.ptr.index}`);
+            const currentPtr = h.getNewTempVar();
+            generator.emit(`${currentPtr} = load ${elementPtrType}, ${elementPtrType}* ${ptrPtr}, align 8`);
+
+            const lenPtr = h.getNewTempVar();
+            generator.emit(`${lenPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.len.index}`);
+            const currentLen = h.getNewTempVar();
+            generator.emit(`${currentLen} = load i64, i64* ${lenPtr}, align 8`);
+
+            const capPtr = h.getNewTempVar();
+            generator.emit(`${capPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.cap.index}`);
+            const currentCap = h.getNewTempVar();
+            generator.emit(`${currentCap} = load i64, i64* ${capPtr}, align 8`);
+
+            const needsReallocCond = h.getNewTempVar();
+            generator.emit(`${needsReallocCond} = icmp uge i64 ${currentLen}, ${currentCap}`);
+
+            const reallocLabel = generator.getNewLabel('array.append.realloc');
+            const noReallocLabel = generator.getNewLabel('array.append.no_realloc');
+            const continueLabel = generator.getNewLabel('array.append.continue');
+            generator.emit(`br i1 ${needsReallocCond}, label %${reallocLabel}, label %${noReallocLabel}`);
+
+            generator.emit(`${reallocLabel}:`, false);
+            generator.indentLevel++;
+            const newCap = h.getNewTempVar();
+            const isCapZero = h.getNewTempVar();
+            generator.emit(`${isCapZero} = icmp eq i64 ${currentCap}, 0`);
+            const doubledCap = h.getNewTempVar();
+            generator.emit(`${doubledCap} = mul i64 ${currentCap}, 2`);
+            generator.emit(`${newCap} = select i1 ${isCapZero}, i64 1, i64 ${doubledCap}`);
+
+            const elementSizeI64 = generator.ensureI64({ value: `${elementSize}`, type: 'i64' });
+            const totalNewAllocSize = h.getNewTempVar();
+            generator.emit(`${totalNewAllocSize} = mul i64 ${newCap}, ${elementSizeI64}`);
+
+            const newRawPtr = generator.platform.emitMemoryAllocate(generator, { value: totalNewAllocSize, type: 'i64' });
+            const newElementPtr = h.getNewTempVar();
+            generator.emit(`${newElementPtr} = bitcast i8* ${newRawPtr.value} to ${elementPtrType}`);
+
+            const oldPtrNonNull = h.getNewTempVar();
+            generator.emit(`${oldPtrNonNull} = icmp ne ${elementPtrType} ${currentPtr}, null`);
+            const copyOldDataLabel = generator.getNewLabel('array.append.copy_old_data');
+            const skipCopyDataLabel = generator.getNewLabel('array.append.skip_copy_data');
+            generator.emit(`br i1 ${oldPtrNonNull}, label %${copyOldDataLabel}, label %${skipCopyDataLabel}`);
+
+            generator.emit(`${copyOldDataLabel}:`, false);
+            generator.indentLevel++;
+            const oldAllocSize = h.getNewTempVar();
+            generator.emit(`${oldAllocSize} = mul i64 ${currentLen}, ${elementSizeI64}`);
+            generator.builtins.createMemcpy(
+                h.bitcast({ value: newElementPtr, type: elementPtrType }, 'i8*'),
+                h.bitcast({ value: currentPtr, type: elementPtrType }, 'i8*'),
+                { value: oldAllocSize, type: 'i64' }
+            );
+            generator.indentLevel--;
+            generator.emit(`br label %${skipCopyDataLabel}`);
+
+            generator.emit(`${skipCopyDataLabel}:`, false);
+            const oldRawPtr = h.getNewTempVar();
+            generator.emit(`${oldRawPtr} = bitcast ${currentPtr} to i8*`);
+            const oldAllocSizeForFree = h.getNewTempVar();
+            generator.emit(`${oldAllocSizeForFree} = mul i64 ${currentCap}, ${elementSizeI64}`);
+            generator.platform.emitMemoryFree(generator, {value: oldRawPtr, type: 'i8*'}, {value: oldAllocSizeForFree, type: 'i64'});
+
+            generator.emit(`store ${elementPtrType} ${newElementPtr}, ${elementPtrType}* ${ptrPtr}, align 8`);
+            generator.emit(`store i64 ${newCap}, i64* ${capPtr}, align 8`);
+            generator.emit(`br label %${continueLabel}`);
+            generator.indentLevel--;
+
+            generator.emit(`${noReallocLabel}:`, false);
+            generator.indentLevel++;
+            generator.emit(`br label %${continueLabel}`);
+            generator.indentLevel--;
+
+            generator.emit(`${continueLabel}:`, false);
+            const finalPtr = h.getNewTempVar();
+            generator.emit(`${finalPtr} = load ${elementPtrType}, ${elementPtrType}* ${ptrPtr}, align 8`);
+            const newElementAddr = h.getNewTempVar();
+            generator.emit(`${newElementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${finalPtr}, i64 ${currentLen}`);
+            
+            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${newElementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
+
+            const newLen = h.getNewTempVar();
+            generator.emit(`${newLen} = add i64 ${currentLen}, 1`);
+            generator.emit(`store i64 ${newLen}, i64* ${lenPtr}, align 8`);
+
+            const finalArrayStruct = h.getNewTempVar();
+            generator.emit(`${finalArrayStruct} = load ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, align ${h.getAlign(arrayStructType)}`);
+            return { value: finalArrayStruct, type: arrayStructType };
+        }
+    },
+    {
+        name: '_builtin_array_get',
+        handler: (generator, args) => {
+            const arrayPtrValue = args[0]!;
+            const indexValue = args[1]!;
+
+            if (!arrayPtrValue || !arrayPtrValue.type.startsWith(LangItems.array.structPrefix) || !arrayPtrValue.type.endsWith('*')) {
+                throw new Error("_builtin_array_get expects a pointer to an array struct as the first argument.");
+            }
+            if (!indexValue || indexValue.type !== 'i64') {
+                throw new Error("_builtin_array_get expects an i64 index as the second argument.");
+            }
+
+            const arrayStructType = arrayPtrValue.type.slice(0, -1);
+            let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
+            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('pointer.')) {
+                elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
+            }
+            const elementPtrType = generator.llvmHelper.getPointerType(elementTypeLlvmType);
+            const h = generator.llvmHelper;
+
+            const ptrPtr = h.getNewTempVar();
+            generator.emit(`${ptrPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.ptr.index}`);
+            const dataPtr = h.getNewTempVar();
+            generator.emit(`${dataPtr} = load ${elementPtrType}, ${elementPtrType}* ${ptrPtr}, align 8`);
+
+            const lenPtr = h.getNewTempVar();
+            generator.emit(`${lenPtr} = getelementptr inbounds ${arrayStructType}, ${arrayPtrValue.type} ${arrayPtrValue.value}, i32 0, i32 ${LangItems.array.members.len.index}`);
+            const currentLen = h.getNewTempVar();
+            generator.emit(`${currentLen} = load i64, i64* ${lenPtr}, align 8`);
+
+            const outOfBoundsCond = h.getNewTempVar();
+            generator.emit(`${outOfBoundsCond} = icmp uge i64 ${indexValue.value}, ${currentLen}`);
+            const inBoundsLabel = generator.getNewLabel('array.get.inbounds');
+            const outOfBoundsLabel = generator.getNewLabel('array.get.oob');
+            generator.emit(`br i1 ${outOfBoundsCond}, label %${outOfBoundsLabel}, label %${inBoundsLabel}`);
+
+            generator.emit(`${outOfBoundsLabel}:`, false);
+            generator.emit(`call void @__panic_oob()`);
+            generator.emit(`unreachable`);
+            
+            generator.emit(`${inBoundsLabel}:`, false);
+            const elementAddr = h.getNewTempVar();
+            generator.emit(`${elementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${dataPtr}, i64 ${indexValue.value}`);
+            
+            const loadedValue = h.getNewTempVar();
+            generator.emit(`${loadedValue} = load ${elementTypeLlvmType}, ${elementPtrType} ${elementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
+
+            return { value: loadedValue, type: elementTypeLlvmType, address: elementAddr, ptrType: elementPtrType };
+        }
+    },
+
+    {
         name: 'alloca', // User-facing name (e.g., from std.yu)
         handler: (generator, args) => {
             if (args.length !== 1) {

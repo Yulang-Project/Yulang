@@ -191,7 +191,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private moduleObjects: Map<string, { structName: string, globalName: string, members: Map<string, ModuleMember>, initialized: boolean }> = new Map();
     private hoistedDefinitions: string[] = []; // Type/const definitions emitted inside functions that must live at module scope
     private hoistedFunctions: string[][] = []; // Full function definitions emitted while inside another function
-    private platform: IPlatform; // NEW: Platform abstraction interface
+    public platform: IPlatform; // NEW: Platform abstraction interface
+    private emittedArrayStructs: Set<string> = new Set(); // NEW: Track emitted array struct types
 
     // Splits a LLVM struct type string "{ T1, T2, ... }" into its top-level fields safely (ignoring nested commas).
     private splitStructFields(structType: string): string[] {
@@ -237,6 +238,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.emit(`target triple = "${this.platform.getTargetTriple()}"`, false);
         this.emit(`target datalayout = "${this.platform.getDataLayout()}"`, false);
         this.emitLangItemStructs();
+        this.builtins.createPanicOOB(); // Ensure __panic_oob is declared
         this.emitLowLevelRuntime();
         this.emitHeapGlobals();
         this.emit("", false);
@@ -598,7 +600,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const leftDataPtr = this.llvmHelper.getNewTempVar();
         this.emit(`${leftDataPtrPtr} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${left.value}, i32 0, i32 ${LangItems.string.members.ptr.index}`);
         this.emit(`${leftDataPtr} = load i8*, i8** ${leftDataPtrPtr}, align 8`);
-        const copyLeft = this.builtins.createMemcpy(destPtr, leftDataPtr, leftLen);
+        const copyLeft = this.builtins.createMemcpy(
+            { value: destPtr, type: 'i8*' },
+            { value: leftDataPtr, type: 'i8*' },
+            { value: leftLen, type: 'i64' }
+        );
         this.emit(copyLeft);
 
         // Copy right to dest + leftLen
@@ -608,7 +614,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const rightDataPtr = this.llvmHelper.getNewTempVar();
         this.emit(`${rightDataPtrPtr} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${right.value}, i32 0, i32 ${LangItems.string.members.ptr.index}`);
         this.emit(`${rightDataPtr} = load i8*, i8** ${rightDataPtrPtr}, align 8`);
-        const copyRight = this.builtins.createMemcpy(destRight, rightDataPtr, rightLen);
+        const copyRight = this.builtins.createMemcpy(
+            { value: destRight, type: 'i8*' },
+            { value: rightDataPtr, type: 'i8*' },
+            { value: rightLen, type: 'i64' }
+        );
         this.emit(copyRight);
 
         // Add null terminator
@@ -643,7 +653,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return null;
     }
 
-    private coerceValue(value: IRValue, targetType: string): IRValue {
+    public coerceValue(value: IRValue, targetType: string): IRValue {
         if (value.type === targetType) return value;
 
         const converted = this.llvmHelper.getNewTempVar();
@@ -1435,6 +1445,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         if (stmt.type) { // 显式类型注解
             llvmType = this.llvmHelper.getLLVMType(stmt.type);
+            // If it's an array type, ensure its definition is emitted.
+            if (stmt.type instanceof ArrayTypeAnnotation) { // Check for ArrayTypeAnnotation instance directly
+                this.llvmHelper.ensureArrayStructDefinition(this.llvmHelper.getLLVMType(stmt.type.elementType));
+            }
             if (stmt.initializer) {
                 // Provide expected struct type to object literal lowering
                 this.objectLiteralExpectedStructType = (llvmType.startsWith('%struct.') && !llvmType.endsWith('*')) ? llvmType : null;
@@ -1449,6 +1463,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 // 字符串字面量推断为值类型 string（结构体）
                 if (initValue.type === `${LangItems.string.structName}*` && !initValue.type.endsWith(')*')) { // 排除函数指针
                     llvmType = LangItems.string.structName;
+                } else if (initValue.type.startsWith(LangItems.array.structPrefix)) { // NEW: Array type inference
+                    llvmType = initValue.type;
                 } else if (initValue.ptrType) {
                     // 地址推断为指针类型
                     llvmType = initValue.ptrType;
@@ -1478,10 +1494,21 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const loadedStruct = this.llvmHelper.getNewTempVar();
                 this.emit(`${loadedStruct} = load ${llvmType}, ${llvmType}* ${initValue.value}, align ${this.llvmHelper.getAlign(llvmType)}`);
                 this.emit(`store ${llvmType} ${loadedStruct}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+            } else if (llvmType.startsWith(LangItems.array.structPrefix) && initValue.type.startsWith(LangItems.array.structPrefix)) {
+                 // Copy the array struct value directly
+                const coerced = this.coerceValue(initValue, llvmType);
+                this.emit(`store ${llvmType} ${coerced.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
             } else {
                 const coerced = this.coerceValue(initValue, llvmType);
                 this.emit(`store ${llvmType} ${coerced.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
             }
+        } else if (llvmType.startsWith(LangItems.array.structPrefix)) { // NEW: Default initialize empty array
+            // Default initialize array to { null, 0, 0 }
+            const elementTypeLlvmType = this.llvmHelper.getLLVMType((stmt.type as ArrayTypeAnnotation).elementType);
+            const elementPtrType = this.llvmHelper.getPointerType(elementTypeLlvmType);
+            const nullPtr = 'null';
+            const zeroI64 = '0';
+            this.emit(`store ${llvmType} { ${elementPtrType} ${nullPtr}, i64 ${zeroI64}, i64 ${zeroI64} }, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
         }
     }
 
@@ -1575,7 +1602,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 this.emit(`${destI8Ptr} = bitcast ${sretPtrLlvmType} ${destPtr} to i8*`);
                 this.emit(`${srcI8Ptr} = bitcast ${retVal.type} ${srcPtr} to i8*`);
 
-                const call = this.builtins.createMemcpy(destI8Ptr, srcI8Ptr, sizeOfStructI64);
+                const call = this.builtins.createMemcpy(
+                    { value: destI8Ptr, type: 'i8*' },
+                    { value: srcI8Ptr, type: 'i8*' },
+                    { value: sizeOfStructI64, type: 'i64' }
+                );
                 this.emit(call);
                 this.emit(`ret void`);
             } else {
@@ -1926,6 +1957,42 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             const loaded = this.llvmHelper.getNewTempVar();
             this.emit(`${loaded} = load ${member.llvmType}, ${member.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
             return { value: loaded, type: member.llvmType };
+        }
+
+        // NEW: Handle array.len and array.cap access
+        if (objectInfo.type.startsWith(LangItems.array.structPrefix)) {
+            const arrayStructType = objectInfo.type;
+            const arrayPtr = objectInfo.address || objectInfo.value; // Get the pointer to the array struct
+
+            if (!arrayPtr) {
+                throw new Error(`Cannot get member '${memberName}' of a non-addressable array value.`);
+            }
+
+            let memberIndex: number;
+            let memberLlvmType: string;
+
+            switch (memberName) {
+                case 'len':
+                    memberIndex = LangItems.array.members.len.index;
+                    memberLlvmType = LangItems.array.members.len.type;
+                    break;
+                case 'cap':
+                    memberIndex = LangItems.array.members.cap.index;
+                    memberLlvmType = LangItems.array.members.cap.type;
+                    break;
+                case 'ptr': // Allow direct access to underlying pointer for C compatibility
+                    memberIndex = LangItems.array.members.ptr.index;
+                    memberLlvmType = LangItems.array.members.ptr.type;
+                    break;
+                default:
+                    throw new Error(`Undefined member '${memberName}' in array type '${arrayStructType}'.`);
+            }
+
+            const memberPtrVar = this.llvmHelper.getNewTempVar();
+            this.emit(`${memberPtrVar} = getelementptr inbounds ${arrayStructType}, ${arrayStructType}* ${arrayPtr}, i32 0, i32 ${memberIndex}`);
+            const loadedValue = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedValue} = load ${memberLlvmType}, ${memberLlvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberLlvmType)}`);
+            return { value: loadedValue, type: memberLlvmType };
         }
 
         // Lang Item: string.length will now be handled as a regular method/property access

@@ -4,6 +4,7 @@ import { ASTNode, BasicTypeAnnotation, ArrayTypeAnnotation, TypeAnnotation, Poin
 import { Token, TokenType } from "../token.js";
 import { resolveLangItemType } from "./builtins.js";
 import { LangItems } from "./lang_items.js";
+import type { IRValue } from "./ir_generator.js";
 
 type GlobalStringEntry = {
     charPtrGlobalName: string; // Name of the global for the char array (e.g., @.str.0)
@@ -108,8 +109,8 @@ export class LLVMIRHelper {
         }
 
         if (typeAnnotation instanceof ArrayTypeAnnotation) {
-            // Placeholder logic, might need to be more complex (e.g. a struct)
-            return `${this.getLLVMType(typeAnnotation.elementType)}*`;
+            const elementType = this.getLLVMType(typeAnnotation.elementType);
+            return this.ensureArrayStructDefinition(elementType);
         }
 
         if (typeAnnotation instanceof BasicTypeAnnotation) {
@@ -160,6 +161,8 @@ export class LLVMIRHelper {
         if (llvmType === 'i16') return 2;
         if (llvmType === 'i8' || llvmType === 'i1') return 1;
         if (llvmType === LangItems.string.structName) return 8; // Alignment for string struct
+        // New: Array struct alignment
+        if (llvmType.startsWith(LangItems.array.structPrefix)) return 8; // Array struct contains a pointer, so 8-byte aligned
         
         return 1; // Default to 1-byte alignment
     }
@@ -178,6 +181,11 @@ export class LLVMIRHelper {
             case 'i8':
             case 'i1':
                 return 1;
+            case LangItems.string.structName:
+                return 16; // string struct is { i8*, i64 } -> 8 + 8 = 16 bytes
+            // New: Array struct size
+            case llvmType.startsWith(LangItems.array.structPrefix) ? llvmType : '': // Check if it's an array struct
+                return 24; // array struct is { T*, i64, i64 } -> 8 + 8 + 8 = 24 bytes
             default:
                 // For structs, we'd need more complex logic. For now, assume a reasonable default.
                 // For closure environment, we are summing `sizeOf(pointer)`, so this won't be hit for now.
@@ -204,5 +212,28 @@ export class LLVMIRHelper {
 
     public getPointerType(type: string): string {
         return `${type}*`;
+    }
+
+    public ensureArrayStructDefinition(elementTypeLlvmType: string): string {
+        // Sanitize the element type name for use in the struct name.
+        // Replace special characters like '%', '*', '.' with '_' and spaces.
+        const sanitizedElementType = elementTypeLlvmType.replace(/[%*.]/g, '_').replace(/ /g, '');
+        const arrayStructName = `${LangItems.array.structPrefix}.${sanitizedElementType}`;
+
+        const ptrType = this.getPointerType(elementTypeLlvmType); // The pointer to the actual array data
+        // Define the array struct: { element_type*, i64 len, i64 cap }
+        const definition = `${arrayStructName} = type { ${ptrType}, i64, i64 }`;
+
+        // Request IRGenerator to emit this definition, ensuring it's only emitted once.
+        // This relies on IRGenerator's emitHoisted to handle deduplication.
+        this.generator.emitHoisted(definition);
+        
+        return arrayStructName;
+    }
+
+    public bitcast(value: IRValue, targetType: string): IRValue {
+        const resultVar = this.getNewTempVar();
+        this.generator.emit(`${resultVar} = bitcast ${value.type} ${value.value} to ${targetType}`);
+        return { value: resultVar, type: targetType };
     }
 }

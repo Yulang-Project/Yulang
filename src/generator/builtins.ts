@@ -34,9 +34,9 @@ export class BuiltinFunctions {
     /**
      * Generates a call to the llvm.memcpy intrinsic.
      */
-    public createMemcpy(dest: string, src: string, len: string): string {
+    public createMemcpy(dest: IRValue, src: IRValue, len: IRValue): string {
         // Call our internal inline memcpy
-        return `call void @__memcpy_inline(i8* ${dest}, i8* ${src}, i64 ${len})`;
+        return `call void @__memcpy_inline(i8* ${dest.value}, i8* ${src.value}, i64 ${len.value})`;
     }
 
     /**
@@ -58,5 +58,9 @@ export class BuiltinFunctions {
         this.helpers.getGenerator().emit(`store i64 ${lenValue}, i64* ${resLenField}, align 8`);
 
         return { value: resultStructPtr, type: `${LangItems.string.structName}*` };
+    }
+
+    public createPanicOOB(): void {
+        this.helpers.getGenerator().emit(`declare void @__panic_oob()`, false);
     }
 }

@@ -25,6 +25,15 @@ export const LangItems = {
     object: {
         typeName: 'object',
         structName: '%struct.object',
+    },
+    array: {
+        typeName: 'array', // The Yu type name prefix
+        structPrefix: '%struct.array', // The LLVM struct name prefix (e.g., %struct.array.i32)
+        members: {
+            ptr: { index: 0, type: 'i8*' }, // Pointer to the raw data (element type array)
+            len: { index: 1, type: 'i64' }, // Current number of elements
+            cap: { index: 2, type: 'i64' }, // Total allocated capacity
+        }
     }
     // Future lang items can be added here, e.g., for arrays, memory allocation, etc.
 };
