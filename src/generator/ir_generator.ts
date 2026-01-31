@@ -3,7 +3,7 @@
 import {
     ASTNode, type ExprVisitor, type StmtVisitor,
     Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, AddressOfExpr, DereferenceExpr, FunctionLiteralExpr,
-    Stmt, ExpressionStmt, BlockStmt, LetStmt, ConstStmt, IfStmt, WhileStmt, ReturnStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, ImportStmt, DeclareFunction,
+    Stmt, ExpressionStmt, BlockStmt, LetStmt, ConstStmt, IfStmt, WhileStmt, ReturnStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, ImportStmt, DeclareFunction, MacroBlockStmt,
     TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, UsingStmt, PointerTypeAnnotation, FunctionTypeAnnotation
 } from '../ast.js';
 import { Token, TokenType } from '../token.js';
@@ -15,6 +15,7 @@ import { BuiltinFunctions } from './builtins.js';
 import { LangItems } from './lang_items.js';
 import { findPredefinedFunction } from '../predefine/funs.js';
 import type { IPlatform } from '../platform/IPlatform.js'; // NEW: Import IPlatform
+import { MACRO_BLOCK_FUNCTIONS, findMacroBlockFunction } from '../macro/macros.js'; // Import macro functions
 
 export type IRValue = { value: string, type: string, classInstancePtr?: string, classInstancePtrType?: string, ptr?: string, ptrType?: string, address?: string };
 
@@ -144,6 +145,7 @@ class ClosureAnalyzer implements ExprVisitor<void>, StmtVisitor<void> {
     visitImportStmt(stmt: ImportStmt): void { }
     visitDeclareFunction(decl: DeclareFunction): void { }
     visitUsingStmt(stmt: UsingStmt): void { }
+    visitMacroBlockStmt(stmt: MacroBlockStmt): void { } // NEW: Add this to satisfy StmtVisitor interface
 }
 
 
@@ -172,6 +174,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
     private globalScope: Scope = new Scope(null, 0);
     public currentScope: Scope = this.globalScope;
+    private inMacroBlock: boolean = false; // NEW: Track if currently inside a macro block
+    private macroBlockType: TokenType | null = null; // NEW: Store the type of the current macro block
     private currentFunction: FunctionDeclaration | null = null;
     private labelCounter = 0;
     private classDefinitions: Map<string, ClassEntry> = new Map();
@@ -991,7 +995,18 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         // Handle predefined/builtin functions directly
         if (expr.callee instanceof IdentifierExpr) {
-            const predefined = findPredefinedFunction(expr.callee.name.lexeme);
+            const calleeName = expr.callee.name.lexeme;
+
+            // NEW: Check for macro block functions first if inside a macro block
+            if (this.inMacroBlock && this.macroBlockType === TokenType.UNSAFE) {
+                const macroFunc = findMacroBlockFunction(calleeName);
+                if (macroFunc) {
+                    const evaluatedArgs = expr.args.map(a => a.accept(this) as IRValue);
+                    return macroFunc.handler(this, evaluatedArgs);
+                }
+            }
+
+            const predefined = findPredefinedFunction(calleeName);
             if (predefined) {
                 const evaluatedArgs = expr.args.map(a => a.accept(this) as IRValue);
                 return predefined.handler(this, evaluatedArgs);
@@ -1571,6 +1586,21 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         this.indentLevel--;
 
         this.emit(`${endLabel}:`, false);
+    }
+
+    visitMacroBlockStmt(stmt: MacroBlockStmt): void { // NEW: visitMacroBlockStmt
+        const savedInMacroBlock = this.inMacroBlock;
+        const savedMacroBlockType = this.macroBlockType;
+
+        this.inMacroBlock = true;
+        this.macroBlockType = stmt.macroType.type; // e.g., TokenType.UNSAFE
+
+        this.enterScope(); // Macro blocks create a new scope
+        stmt.body.accept(this); // Generate IR for the block's body
+        this.exitScope(); // Exit macro block scope
+
+        this.inMacroBlock = savedInMacroBlock;
+        this.macroBlockType = savedMacroBlockType;
     }
 
     visitReturnStmt(stmt: ReturnStmt): void {

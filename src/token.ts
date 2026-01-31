@@ -47,6 +47,8 @@ export enum TokenType {
     POINTER = 'POINTER', // NEW: Add POINTER token
     TRUE = 'TRUE', // NEW: Add TRUE token
     FALSE = 'FALSE', // NEW: Add FALSE token
+    MACRO = 'MACRO', // NEW: Add MACRO token
+    UNSAFE = 'UNSAFE', // NEW: Add UNSAFE token
     // Identifiers
     IDENTIFIER = 'IDENTIFIER',
 
@@ -163,4 +165,6 @@ Object.assign(keywords, {
     'pointer': TokenType.POINTER,
     'true': TokenType.TRUE, // NEW
     'false': TokenType.FALSE, // NEW
+    'macro': TokenType.MACRO, // NEW
+    'unsafe': TokenType.UNSAFE, // NEW
 })

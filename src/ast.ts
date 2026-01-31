@@ -35,6 +35,7 @@ export interface StmtVisitor<R> {
     visitImportStmt(stmt: ImportStmt): R;
     visitDeclareFunction(decl: DeclareFunction): R;
     visitUsingStmt(stmt: UsingStmt): R; // ADDED: visitUsingStmt
+    visitMacroBlockStmt(stmt: MacroBlockStmt): R; // NEW: Visit MacroBlockStmt
 }
 
 // Base classes need a generic accept method for nodes that might be used in multiple contexts (like TypeAnnotation)
@@ -279,6 +280,11 @@ export class UsingStmt extends Stmt {
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitUsingStmt(this); } // Need to add visitUsingStmt to StmtVisitor
 }
 
+export class MacroBlockStmt extends Stmt {
+    constructor(public macroType: Token, public body: BlockStmt) { super(); }
+    accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitMacroBlockStmt(this); }
+}
+
 
 // A combined visitor for convenience, e.g. for a printer
 export interface AstVisitor<R> extends ExprVisitor<R>, StmtVisitor<R> {}
@@ -402,6 +408,10 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
     visitUsingStmt(stmt: UsingStmt): string { // ADDED: visitUsingStmt
         const aliasPart = stmt.alias ? ` as ${stmt.alias.lexeme}` : '';
         return this.parenthesize(`using ${stmt.path.literal}${aliasPart}`);
+    }
+
+    visitMacroBlockStmt(stmt: MacroBlockStmt): string {
+        return this.parenthesize(`macro(${stmt.macroType.lexeme})`, stmt.body);
     }
     
     // TypeAnnotationVisitor methods for AstPrinter

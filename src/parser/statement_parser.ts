@@ -2,7 +2,7 @@
 
 import { Token, TokenType } from '../token.js';
 import {
-    Stmt, ExpressionStmt, IfStmt, WhileStmt, ReturnStmt, BlockStmt, LetStmt,
+    Stmt, ExpressionStmt, IfStmt, WhileStmt, ReturnStmt, BlockStmt, LetStmt, MacroBlockStmt,
     Expr, LiteralExpr, FunctionLiteralExpr, FunctionTypeAnnotation, TypeAnnotation, BasicTypeAnnotation // Added new AST imports
 } from '../ast.js';
 import { Parser } from './index.js'; // Import Parser from the main parser file
@@ -15,6 +15,7 @@ export class StatementParser {
     }
 
     public statement(): Stmt {
+        if (this.parser.match(TokenType.MACRO)) return this.macroBlockStatement(); // NEW
         if (this.parser.match(TokenType.IF)) return this.ifStatement();
         if (this.parser.match(TokenType.WHILE)) return this.whileStatement();
         if (this.parser.match(TokenType.FOR)) return this.forStatement(); // NEW: Handle for loop
@@ -132,5 +133,19 @@ export class StatementParser {
         const expr = this.parser.expression();
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after expression.");
         return new ExpressionStmt(expr);
+    }
+
+    private macroBlockStatement(): MacroBlockStmt {
+        this.parser.consume(TokenType.LPAREN, "Expect '(' after 'macro'.");
+        const macroTypeToken = this.parser.consume(TokenType.IDENTIFIER, "Expect macro type (e.g., 'unsafe') after '('.");
+        // Validate macroTypeToken is a known macro type, e.g., TokenType.UNSAFE
+        // Here, we check the actual TokenType of the identified macro type
+        if (macroTypeToken.type !== TokenType.UNSAFE) { // Future: extend to other macro types
+            this.parser.error(macroTypeToken, `Unknown macro type '${macroTypeToken.lexeme}'. Only 'unsafe' is supported for now.`);
+        }
+        this.parser.consume(TokenType.RPAREN, "Expect ')' after macro type.");
+        this.parser.consume(TokenType.LBRACE, "Expect '{' before macro block body.");
+        const body = this.block(); // Reuse existing block parsing
+        return new MacroBlockStmt(macroTypeToken, body);
     }
 }
