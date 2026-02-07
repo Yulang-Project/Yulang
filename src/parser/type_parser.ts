@@ -50,6 +50,13 @@ export class TypeParser {
             return new BasicTypeAnnotation(this.parser.previous());
         }
         
+        if (this.parser.match(TokenType.ARRAY)) { // Add this block
+            this.parser.consume(TokenType.LPAREN, "Expect '(' after 'array'.");
+            const elementType = this.parse(); // Recursively parse the element type
+            this.parser.consume(TokenType.RPAREN, "Expect ')' after array element type.");
+            return new ArrayTypeAnnotation(elementType);
+        }
+
         if (this.parser.match(TokenType.IDENTIFIER)) {
             let nameToken = this.parser.previous();
             if (this.parser.match(TokenType.DOT)) {

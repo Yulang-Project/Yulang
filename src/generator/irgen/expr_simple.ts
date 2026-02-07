@@ -5,7 +5,7 @@ import {
 } from '../../ast.js';
 import { TokenType } from '../../token.js';
 import { LangItems } from '../lang_items.js';
-import { IRGenerator } from './ir_generator_base.js';
+import { IRGenerator } from './ir_generator_base.js'; // 注意：这里是 { IRGenerator } 而不是 type { IRGenerator }
 import * as irgen_utils from './ir_generator_utils.js';
 import type { IRValue } from './types_scopes.js';
 
@@ -52,7 +52,15 @@ export function visitBinaryExpr(generator: IRGenerator, expr: BinaryExpr): IRVal
                 }
             }
 
-            // 数字加法
+            // 指针加法 (ptr + int)
+            if (left.type.endsWith('*') && right.type.startsWith('i')) {
+                const baseType = left.type.slice(0, -1); // 移除 '*' 获取基础类型
+                const rightI64 = irgen_utils.ensureI64(generator, right); // ensureI64 返回 string 值
+                generator.emit(`${resultVar} = getelementptr inbounds ${baseType}, ${left.type} ${left.value}, i64 ${rightI64.value}`); // 注意这里，rightI64 应该直接是 string
+                return { value: resultVar, type: left.type }; // 结果类型仍然是原始指针类型
+            }
+
+            // 数字加法 (如果不是字符串也不是指针，那就是数字)
             generator.emit(`${resultVar} = add nsw ${left.type} ${left.value}, ${right.value}`);
             return { value: resultVar, type: left.type };
 
@@ -75,8 +83,8 @@ export function visitBinaryExpr(generator: IRGenerator, expr: BinaryExpr): IRVal
             generator.emit(`${resultVar} = or ${left.type} ${left.value}, ${right.value}`);
             return { value: resultVar, type: left.type };
         case TokenType.CARET: // Added CARET for bitwise XOR
-            generator.emit(`${resultVar} = xor ${left.type} ${left.value}, ${right.value}`);
-            return { value: resultVar, type: left.type };
+            generator.emit(`${resultVar} = xor ${left.type} ${left.value}, 1`);
+            return { value: resultVar, type: 'i1' };
         case TokenType.LT_LT: // Added LT_LT for left shift
             generator.emit(`${resultVar} = shl ${left.type} ${left.value}, ${right.value}`);
             return { value: resultVar, type: left.type };

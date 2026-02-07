@@ -13,7 +13,7 @@ export function emitMemoryAllocate_X86_64(platform: X86_64LinuxPlatform, generat
 
     // 获取对齐后的 size
     const alignedSize = generator.llvmHelper.getNewTempVar();
-    generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${platform.getPointerAlignmentInBytes() - 1}`);
+    generator.emit(`${alignedSize} = add i64 ${sizeI64.value}, ${platform.getPointerAlignmentInBytes() - 1}`);
     const alignedSize2 = generator.llvmHelper.getNewTempVar();
     generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-platform.getPointerAlignmentInBytes()}`);
 
@@ -52,7 +52,7 @@ export function emitMemoryFree_X86_64(platform: X86_64LinuxPlatform, generator: 
 
     // 获取对齐后的 size
     const alignedSize = generator.llvmHelper.getNewTempVar();
-    generator.emit(`${alignedSize} = add i64 ${sizeI64}, ${platform.getPointerAlignmentInBytes() - 1}`);
+    generator.emit(`${alignedSize} = add i64 ${sizeI64.value}, ${platform.getPointerAlignmentInBytes() - 1}`);
     const alignedSize2 = generator.llvmHelper.getNewTempVar();
     generator.emit(`${alignedSize2} = and i64 ${alignedSize}, ${-platform.getPointerAlignmentInBytes()}`);
 

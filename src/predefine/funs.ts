@@ -47,6 +47,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
                 throw new Error("toString() requires exactly one argument.");
             }
             const arg = args[0]!;
+            console.log(`DEBUG: toString received arg.type = ${arg?.type}`);
             let normalized = arg;
             if (arg.type === 'i32') {
                 const widened = generator.llvmHelper.getNewTempVar();
@@ -335,6 +336,9 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             }
             const ptrArg = args[0];
             const lenArg = args[1];
+            
+
+
             if (!ptrArg || ptrArg.type !== 'i8*' || !lenArg || lenArg.type !== 'i64') {
                 throw new Error("_builtin_create_string arguments must be ptr (i8*) and len (i64).");
             }
@@ -405,7 +409,11 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
 
             const arrayStructType = arrayPtrValue.type.slice(0, -1);
             let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
-            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('_struct_')) {
+                elementTypeLlvmType = '%' + elementTypeLlvmType.substring(1).replace(/_/g, '.');
+            } else {
+                elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            }
             if (elementTypeLlvmType.startsWith('pointer.')) {
                 elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
             }
@@ -452,6 +460,9 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             const arrayPtrValue = args[0]!;
             const elementValue = args[1]!;
 
+            // DEBUG: Print the types received
+            console.log(`DEBUG: _builtin_array_append received arrayPtrValue.type = ${arrayPtrValue?.type}, elementValue.type = ${elementValue?.type}`);
+
             if (!arrayPtrValue || !arrayPtrValue.type.startsWith(LangItems.array.structPrefix) || !arrayPtrValue.type.endsWith('*')) {
                 throw new Error("_builtin_array_append expects a pointer to an array struct as the first argument.");
             }
@@ -461,7 +472,11 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
 
             const arrayStructType = arrayPtrValue.type.slice(0, -1);
             let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
-            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('_struct_')) {
+                elementTypeLlvmType = '%' + elementTypeLlvmType.substring(1).replace(/_/g, '.');
+            } else {
+                elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            }
             if (elementTypeLlvmType.startsWith('pointer.')) {
                 elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
             }
@@ -503,7 +518,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
 
             const elementSizeI64 = irgen_utils.ensureI64(generator, { value: `${elementSize}`, type: 'i64' });
             const totalNewAllocSize = h.getNewTempVar();
-            generator.emit(`${totalNewAllocSize} = mul i64 ${newCap}, ${elementSizeI64}`);
+            generator.emit(`${totalNewAllocSize} = mul i64 ${newCap}, ${elementSizeI64.value}`);
 
             const newRawPtr = generator.platform.emitMemoryAllocate(generator, { value: totalNewAllocSize, type: 'i64' });
             const newElementPtr = h.getNewTempVar();
@@ -518,7 +533,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             generator.emit(`${copyOldDataLabel}:`, false);
             generator.indentLevel++;
             const oldAllocSize = h.getNewTempVar();
-            generator.emit(`${oldAllocSize} = mul i64 ${currentLen}, ${elementSizeI64}`);
+            generator.emit(`${oldAllocSize} = mul i64 ${currentLen}, ${elementSizeI64.value}`);
             generator.builtins.createMemcpy(
                 h.bitcast({ value: newElementPtr, type: elementPtrType }, 'i8*'),
                 h.bitcast({ value: currentPtr, type: elementPtrType }, 'i8*'),
@@ -528,11 +543,10 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             generator.emit(`br label %${skipCopyDataLabel}`);
 
             generator.emit(`${skipCopyDataLabel}:`, false);
-            const oldRawPtr = h.getNewTempVar();
-            generator.emit(`${oldRawPtr} = bitcast ${currentPtr} to i8*`);
+            const oldRawPtrIRValue = h.bitcast({ value: currentPtr, type: elementPtrType }, 'i8*');
             const oldAllocSizeForFree = h.getNewTempVar();
-            generator.emit(`${oldAllocSizeForFree} = mul i64 ${currentCap}, ${elementSizeI64}`);
-            generator.platform.emitMemoryFree(generator, {value: oldRawPtr, type: 'i8*'}, {value: oldAllocSizeForFree, type: 'i64'});
+            generator.emit(`${oldAllocSizeForFree} = mul i64 ${currentCap}, ${elementSizeI64.value}`);
+            generator.platform.emitMemoryFree(generator, {value: oldRawPtrIRValue.value, type: 'i8*'}, {value: oldAllocSizeForFree, type: 'i64'});
 
             generator.emit(`store ${elementPtrType} ${newElementPtr}, ${elementPtrType}* ${ptrPtr}, align 8`);
             generator.emit(`store i64 ${newCap}, i64* ${capPtr}, align 8`);
@@ -577,7 +591,11 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
 
             const arrayStructType = arrayPtrValue.type.slice(0, -1);
             let elementTypeLlvmType = arrayStructType.substring(LangItems.array.structPrefix.length + 1);
-            elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            if (elementTypeLlvmType.startsWith('_struct_')) {
+                elementTypeLlvmType = '%' + elementTypeLlvmType.substring(1).replace(/_/g, '.');
+            } else {
+                elementTypeLlvmType = elementTypeLlvmType.replace(/_/g, '.');
+            }
             if (elementTypeLlvmType.startsWith('pointer.')) {
                 elementTypeLlvmType = elementTypeLlvmType.replace('pointer.', '') + '*';
             }

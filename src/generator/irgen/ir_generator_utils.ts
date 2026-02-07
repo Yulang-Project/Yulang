@@ -57,18 +57,18 @@ export function emitLowLevelRuntime(generator: IRGenerator): void {
  * @param irValue 要检查的 IRValue。
  * @returns 转换为 i64 的值字符串。
  */
-export function ensureI64(generator: IRGenerator, irValue: IRValue): string {
-    if (irValue.type === 'i64') return irValue.value;
+export function ensureI64(generator: IRGenerator, irValue: IRValue): IRValue {
+    if (irValue.type === 'i64') return irValue;
 
     const resultVar = generator.llvmHelper.getNewTempVar();
 
     if (irValue.type === 'i32') {
         generator.emit(`${resultVar} = sext i32 ${irValue.value} to i64`);
-        return resultVar;
+        return { value: resultVar, type: 'i64' };
     }
     if (irValue.type === 'i1') {
         generator.emit(`${resultVar} = zext i1 ${irValue.value} to i64`);
-        return resultVar;
+        return { value: resultVar, type: 'i64' };
     }
     if (irValue.type.endsWith('*')) {
         const ptrSize = generator.platform.getPointerSizeInBits();
@@ -76,11 +76,10 @@ export function ensureI64(generator: IRGenerator, irValue: IRValue): string {
         generator.emit(`${ptrToIntTemp} = ptrtoint ${irValue.type} ${irValue.value} to i${ptrSize}`);
 
         if (ptrSize === 64) {
-            generator.emit(`${resultVar} = add i64 0, ${ptrToIntTemp}`);
-            return resultVar;
+            return { value: ptrToIntTemp, type: 'i64' };
         } else {
             generator.emit(`${resultVar} = sext i${ptrSize} ${ptrToIntTemp} to i64`);
-            return resultVar;
+            return { value: resultVar, type: 'i64' };
         }
     }
 

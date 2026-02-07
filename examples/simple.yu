@@ -1,36 +1,36 @@
 #import "std/io" as io;
 
-// 假设这些内置函数已由编译器提供或通过标准库声明
-declare fun _builtin_string_get_len(ptr: pointer(i8)): i64;
-declare fun _builtin_create_string(ptr: pointer(i8), len: i64): string;
-declare fun _builtin_array_append(arr: array(string), element: string): array(string);
+// 内置函数声明
+declare fun _builtin_create_string(ptr: pointer(char), len: i64): string;
+declare fun _builtin_array_append(arr_ptr: pointer(array(string)), element: string): array(string);
+declare fun _builtin_array_get(arr: array(string), index: i64): string;
+declare fun toString(val: i64): string;
 
 // 汇编 bootstrap 会跳转到这个入口函数
 // 它接收标准的 argc 和 argv 参数，argv 是 char** (pointer(pointer(i8)))
-// 这里模拟 C 语言风格的参数传递：argv 是一个指向 char* 数组的指针
-fun _start_entry(argc: i32, argv_base_ptr: pointer(pointer(i8))): i32 {
+fun _start_entry(argc: i32, argv_base_ptr: pointer(pointer(char))): i32 {
     io.output("进入 _start_entry 函数 (底层参数处理跳板)\n");
 
     // 声明 Yulang 风格的字符串数组，编译器会自动进行默认初始化（空数组）
     let yulang_args: array(string); 
 
-    let i: i32 = 0;
-    while (i < argc) {
-        // --- 模拟 unsafe 块/底层指针操作 ---
-        // 在 Yulang 中，pointer(pointer(i8)) + i 等同于 C 语言的 &argv_base_ptr[i]
-        // 即获取第 i 个 char* 的地址
-        let current_char_ptr_addr: pointer(pointer(i8)) = argv_base_ptr + (i as i64);
-        
-        // deref 操作符用于解引用指针，这里获取第 i 个 char* 的值
-        // 这等同于 C 语言的 argv_base_ptr[i]
-        let c_str_ptr: pointer(i8) = deref(current_char_ptr_addr);
+    let i: i64 = 0;
+    while (i < (argc as i64)) {
+        // --- unsafe 块 (模拟底层指针操作) ---
+        let current_char_ptr_addr: pointer(pointer(char)) = argv_base_ptr + (i as i64);
+        let c_str_ptr: pointer(char) = *current_char_ptr_addr;
 
-        // 将 C 风格字符串转换为 Yulang 字符串
-        let len: i64 = _builtin_string_get_len(c_str_ptr);
+        // 内联 c_strlen 的逻辑
+        let len: i64 = 0;
+        while (*(c_str_ptr + len) != '\0') {
+            len = len + 1;
+        }
+        
+        // 使用获取到的长度创建 Yulang 字符串
         let arg_str: string = _builtin_create_string(c_str_ptr, len);
         
         // 将 Yulang 字符串追加到数组
-        yulang_args = _builtin_array_append(yulang_args, arg_str);
+        yulang_args = _builtin_array_append(&yulang_args, arg_str);
         
         i = i + 1;
     }
@@ -43,15 +43,15 @@ fun _start_entry(argc: i32, argv_base_ptr: pointer(pointer(i8))): i32 {
 fun main(args: array(string)): i32 {
     io.output("hello from main! (已接收命令行参数)\n");
     io.output("命令行参数数量: ");
-    io.output(args.len as string); // 假设 i64 可以直接转 string，或者需要 to_string 函数
+    io.output(toString(args.len)); // 假设 i64 可以直接转 string，或者需要 to_string 函数
     io.output("\n");
 
     let i: i64 = 0;
     while (i < args.len) {
         io.output("参数[");
-        io.output(i as string); // 假设 i64 可以直接转 string
+        io.output(toString(i)); // 假设 i64 可以直接转 string
         io.output("]: ");
-        io.output(args[i]);
+        // io.output(_builtin_array_get(args, i)); // 暂时注释，用于调试
         io.output("\n");
         i = i + 1;
     }

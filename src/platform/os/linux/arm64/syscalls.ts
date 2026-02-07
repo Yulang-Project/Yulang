@@ -62,7 +62,7 @@ export function emitSyscall_ARM64(platform: ARM64LinuxPlatform, generator: IRGen
 
     const resultVar = generator.llvmHelper.getNewTempVar();
     const callNumVal = irgen_utils.ensureI64(generator, callNum); // Ensure syscall number is i64
-    const asmCall = emitSyscallInlineASM_ARM64(generator, callNumVal, syscallArgs); // Call local function
+    const asmCall = emitSyscallInlineASM_ARM64(generator, callNumVal.value, syscallArgs); // Call local function
 
     generator.emit(`${resultVar} = ${asmCall}`);
     return { value: resultVar, type: 'i64' };

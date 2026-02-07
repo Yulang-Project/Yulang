@@ -24,10 +24,8 @@ export function visitAddressOfExpr(generator: IRGenerator, expr: AddressOfExpr):
         if (!entry) {
             throw new Error(`无法获取未声明变量 '${varName}' 的地址。`);
         }
-        const ptrType = `${entry.llvmType}*`;
-        const asInt = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${asInt} = ptrtoint ${ptrType} ${entry.ptr} to i64`);
-        return { value: asInt, type: 'i64', ptr: entry.ptr, ptrType };
+        const ptrTypeString = `${entry.llvmType}*`; // 正确地定义 ptrTypeString
+        return { value: entry.ptr, type: ptrTypeString }; // 返回原始指针类型
     } else if (expr.expression instanceof GetExpr) {
         // 获取属性的地址，例如 &obj.prop
         const objectInfo = generator.visitGetExpr(expr.expression);
@@ -313,7 +311,11 @@ export function visitGetExpr(generator: IRGenerator, expr: GetExpr): IRValue {
 
     // 处理 array.len 和 array.cap 访问
     if (objectInfo.type.startsWith(LangItems.array.structPrefix)) {
-        const arrayStructType = objectInfo.type;
+        let arrayStructType = objectInfo.type;
+        // If the objectInfo.type is a pointer to the struct, get the struct type itself.
+        if (arrayStructType.endsWith('*')) {
+            arrayStructType = arrayStructType.slice(0, -1);
+        }
         const arrayPtr = objectInfo.address || objectInfo.value;
 
         if (!arrayPtr) {
@@ -341,7 +343,12 @@ export function visitGetExpr(generator: IRGenerator, expr: GetExpr): IRValue {
         }
 
         const memberPtrVar = generator.llvmHelper.getNewTempVar();
-        generator.emit(`${memberPtrVar} = getelementptr inbounds ${arrayStructType}, ${arrayStructType}* ${arrayPtr}, i32 0, i32 ${memberIndex}`);
+        // The objectInfo.value is typically the pointer to the alloca'd variable for the array struct
+        // (e.g., %p.args, which is %struct.array._struct_string**).
+        // We need to load the actual %struct.array._struct_string* from it.
+        const actualArrayStructPtr = generator.llvmHelper.getNewTempVar();
+        generator.emit(`${actualArrayStructPtr} = load ${arrayStructType}*, ${arrayStructType}** ${arrayPtr}, align 8`);
+        generator.emit(`${memberPtrVar} = getelementptr inbounds ${arrayStructType}, ${arrayStructType}* ${actualArrayStructPtr}, i32 0, i32 ${memberIndex}`);
         const loadedValue = generator.llvmHelper.getNewTempVar();
         generator.emit(`${loadedValue} = load ${memberLlvmType}, ${memberLlvmType}* ${memberPtrVar}, align ${generator.llvmHelper.getAlign(memberLlvmType)}`);
         return { value: loadedValue, type: memberLlvmType };

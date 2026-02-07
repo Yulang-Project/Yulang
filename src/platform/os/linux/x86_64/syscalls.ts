@@ -41,7 +41,7 @@ export function emitSyscall_X86_64(platform: X86_64LinuxPlatform, generator: IRG
 
     const resultVar = generator.llvmHelper.getNewTempVar();
     const callNumVal = irgen_utils.ensureI64(generator, callNum);
-    const asmCall = emitSyscallInlineASM_X86_64(generator, callNumVal, syscallArgs); // 直接调用本地函数
+    const asmCall = emitSyscallInlineASM_X86_64(generator, callNumVal.value, syscallArgs); // 直接调用本地函数
 
     generator.emit(`${resultVar} = ${asmCall}`);
     return { value: resultVar, type: 'i64' };

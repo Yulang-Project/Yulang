@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as process from 'process';
 import { LangItems } from '../lang_items.js';
 import { IRGenerator } from './ir_generator_base.js';
+import { findPredefinedFunction } from '../../predefine/funs.js';
 
 /**
  * 处理 FunctionDeclaration。
@@ -246,6 +247,12 @@ export function visitDeclareFunction(generator: IRGenerator, decl: DeclareFuncti
     const paramsString = paramsList.join(', ');
 
     const funcType = `${returnType} (${paramsList.join(', ')})`;
+
+    // 检查是否是预定义函数，如果是，则跳过显式声明
+    if (findPredefinedFunction(originalFuncName)) {
+        // 预定义函数通常有自己的声明方式或不需要显式声明
+        return;
+    }
 
     // 对于声明的函数，我们假设它们是函数指针。
     generator.globalScope.define(originalFuncName, { llvmType: `${funcType}*`, ptr: mangledName, isPointer: true, definedInScopeDepth: generator.globalScope.depth });
