@@ -1,4 +1,5 @@
 import { IRGenerator, type IRValue } from "../../../../generator/ir_generator.js";
+import * as irgen_utils from "../../../../generator/irgen/ir_generator_utils.js";
 import { ARM64LinuxPlatform } from "./platform.js"; // Import the main platform class
 
 // Emits inline assembly for ARM64 Linux syscalls
@@ -60,7 +61,7 @@ export function emitSyscall_ARM64(platform: ARM64LinuxPlatform, generator: IRGen
     while (syscallArgs.length < 8) syscallArgs.push("0");
 
     const resultVar = generator.llvmHelper.getNewTempVar();
-    const callNumVal = generator.ensureI64(callNum); // Ensure syscall number is i64
+    const callNumVal = irgen_utils.ensureI64(generator, callNum); // Ensure syscall number is i64
     const asmCall = emitSyscallInlineASM_ARM64(generator, callNumVal, syscallArgs); // Call local function
 
     generator.emit(`${resultVar} = ${asmCall}`);

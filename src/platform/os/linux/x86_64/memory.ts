@@ -1,4 +1,5 @@
 import { IRGenerator, type IRValue } from "../../../../generator/ir_generator.js";
+import * as irgen_utils from "../../../../generator/irgen/ir_generator_utils.js";
 import { X86_64LinuxPlatform } from "./platform.js";
 import { emitSyscall_X86_64 } from "./syscalls.js"; // 内存分配需要系统调用
 
@@ -8,7 +9,7 @@ export function emitMemoryAllocate_X86_64(platform: X86_64LinuxPlatform, generat
     // 这是一个简化的 bump allocator。真实的 mmap 会更复杂。
     
     // 确保 size 是 i64
-    const sizeI64 = generator.ensureI64(size);
+    const sizeI64 = irgen_utils.ensureI64(generator, size);
 
     // 获取对齐后的 size
     const alignedSize = generator.llvmHelper.getNewTempVar();
@@ -47,7 +48,7 @@ export function emitMemoryFree_X86_64(platform: X86_64LinuxPlatform, generator: 
         generator.emit(`${tempVar} = bitcast ${addr.type} ${addr.value} to i8*`);
         addrI8Ptr = tempVar;
     }
-    const sizeI64 = generator.ensureI64(size);
+    const sizeI64 = irgen_utils.ensureI64(generator, size);
 
     // 获取对齐后的 size
     const alignedSize = generator.llvmHelper.getNewTempVar();

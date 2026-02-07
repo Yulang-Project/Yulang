@@ -1,7 +1,60 @@
 #import "std/io" as io;
 
-fun main(): i32 {
-  io.output("hello\n");
-  return 0;
+// 假设这些内置函数已由编译器提供或通过标准库声明
+declare fun _builtin_string_get_len(ptr: pointer(i8)): i64;
+declare fun _builtin_create_string(ptr: pointer(i8), len: i64): string;
+declare fun _builtin_array_append(arr: array(string), element: string): array(string);
+
+// 汇编 bootstrap 会跳转到这个入口函数
+// 它接收标准的 argc 和 argv 参数，argv 是 char** (pointer(pointer(i8)))
+// 这里模拟 C 语言风格的参数传递：argv 是一个指向 char* 数组的指针
+fun _start_entry(argc: i32, argv_base_ptr: pointer(pointer(i8))): i32 {
+    io.output("进入 _start_entry 函数 (底层参数处理跳板)\n");
+
+    // 声明 Yulang 风格的字符串数组，编译器会自动进行默认初始化（空数组）
+    let yulang_args: array(string); 
+
+    let i: i32 = 0;
+    while (i < argc) {
+        // --- 模拟 unsafe 块/底层指针操作 ---
+        // 在 Yulang 中，pointer(pointer(i8)) + i 等同于 C 语言的 &argv_base_ptr[i]
+        // 即获取第 i 个 char* 的地址
+        let current_char_ptr_addr: pointer(pointer(i8)) = argv_base_ptr + (i as i64);
+        
+        // deref 操作符用于解引用指针，这里获取第 i 个 char* 的值
+        // 这等同于 C 语言的 argv_base_ptr[i]
+        let c_str_ptr: pointer(i8) = deref(current_char_ptr_addr);
+
+        // 将 C 风格字符串转换为 Yulang 字符串
+        let len: i64 = _builtin_string_get_len(c_str_ptr);
+        let arg_str: string = _builtin_create_string(c_str_ptr, len);
+        
+        // 将 Yulang 字符串追加到数组
+        yulang_args = _builtin_array_append(yulang_args, arg_str);
+        
+        i = i + 1;
+    }
+
+    io.output("转换完成，调用 main 函数...\n");
+    return main(yulang_args); // 将处理后的 Yulang 参数传递给 main 函数
 }
 
+// 修改 main 函数的签名以接收 Yulang 的字符串数组参数
+fun main(args: array(string)): i32 {
+    io.output("hello from main! (已接收命令行参数)\n");
+    io.output("命令行参数数量: ");
+    io.output(args.len as string); // 假设 i64 可以直接转 string，或者需要 to_string 函数
+    io.output("\n");
+
+    let i: i64 = 0;
+    while (i < args.len) {
+        io.output("参数[");
+        io.output(i as string); // 假设 i64 可以直接转 string
+        io.output("]: ");
+        io.output(args[i]);
+        io.output("\n");
+        i = i + 1;
+    }
+
+    return 0;
+}

@@ -1,5 +1,6 @@
 import { BuiltinFunctions } from '../generator/builtins.js';
 import { IRGenerator, type IRValue } from '../generator/ir_generator.js';
+import * as irgen_utils from "../generator/irgen/ir_generator_utils.js";
 import { LangItems } from '../generator/lang_items.js';
 import { type PredefinedFunction, type PredefinedFunctionHandler } from './types.js';
 
@@ -33,7 +34,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             if (!sizeArg || sizeArg.type !== 'i64') {
                 throw new Error("_builtin_alloc argument must be of type i64.");
             }
-            generator.ensureHeapGlobals();
+            irgen_utils.ensureHeapGlobals(generator);
             const ptr = generator.llvmHelper.getNewTempVar();
             generator.emit(`${ptr} = call i8* @yulang_malloc(i64 ${sizeArg.value})`);
             return { value: ptr, type: 'i8*' };
@@ -190,7 +191,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             if (args.length !== 1) {
                 throw new Error("toInt() requires exactly one argument.");
             }
-            const strArg = generator.ensureStringPointer(args[0]!);
+            const strArg = irgen_utils.ensureStringPointer(generator, args[0]!);
             if (!strArg) {
                 throw new Error("toInt() expects a string argument.");
             }
@@ -296,7 +297,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             if (args.length !== 1) {
                 throw new Error("_builtin_string_to_ptr requires exactly one argument: string.");
             }
-            const stringArg = generator.ensureStringPointer(args[0]!);
+            const stringArg = irgen_utils.ensureStringPointer(generator, args[0]!);
             if (!stringArg) {
                 throw new Error("_builtin_string_to_ptr argument must be of type string.");
             }
@@ -314,7 +315,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             if (args.length !== 1) {
                 throw new Error("_builtin_string_get_len requires exactly one argument: string.");
             }
-            const stringArg = generator.ensureStringPointer(args[0]!);
+            const stringArg = irgen_utils.ensureStringPointer(generator, args[0]!);
             if (!stringArg) {
                 throw new Error("_builtin_string_get_len argument must be of type string.");
             }
@@ -339,7 +340,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             }
 
             // Allocate string struct via malloc (16 bytes)
-            generator.ensureHeapGlobals();
+            irgen_utils.ensureHeapGlobals(generator);
             const sizeBytes = '16';
             const raw = generator.llvmHelper.getNewTempVar();
             generator.emit(`${raw} = call i8* @yulang_malloc(i64 ${sizeBytes})`);
@@ -439,7 +440,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             generator.emit(`${elementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${dataPtr}, i64 ${indexValue.value}`);
             
             // Store element value
-            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            const coercedElement = irgen_utils.coerceValue(generator, elementValue, elementTypeLlvmType);
             generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${elementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
 
             return { value: '', type: 'void' }; // Set operations typically return void
@@ -500,7 +501,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             generator.emit(`${doubledCap} = mul i64 ${currentCap}, 2`);
             generator.emit(`${newCap} = select i1 ${isCapZero}, i64 1, i64 ${doubledCap}`);
 
-            const elementSizeI64 = generator.ensureI64({ value: `${elementSize}`, type: 'i64' });
+            const elementSizeI64 = irgen_utils.ensureI64(generator, { value: `${elementSize}`, type: 'i64' });
             const totalNewAllocSize = h.getNewTempVar();
             generator.emit(`${totalNewAllocSize} = mul i64 ${newCap}, ${elementSizeI64}`);
 
@@ -549,7 +550,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             const newElementAddr = h.getNewTempVar();
             generator.emit(`${newElementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${finalPtr}, i64 ${currentLen}`);
             
-            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            const coercedElement = irgen_utils.coerceValue(generator, elementValue, elementTypeLlvmType);
             generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${newElementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
 
             const newLen = h.getNewTempVar();

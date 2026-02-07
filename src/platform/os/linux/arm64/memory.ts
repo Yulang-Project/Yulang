@@ -1,4 +1,5 @@
 import { IRGenerator, type IRValue } from "../../../../generator/ir_generator.js";
+import * as irgen_utils from "../../../../generator/irgen/ir_generator_utils.js";
 import { ARM64LinuxPlatform } from "./platform.js";
 import { emitSyscall_ARM64 } from "./syscalls.js"; // Memory allocation needs syscalls
 
@@ -8,7 +9,7 @@ export function emitMemoryAllocate_ARM64(platform: ARM64LinuxPlatform, generator
     // This is a simplified bump allocator. A real mmap would be more complex.
     
     // Ensure size is i64
-    const sizeI64 = generator.ensureI64(size);
+    const sizeI64 = irgen_utils.ensureI64(generator, size);
 
     // Get aligned size
     const alignedSize = generator.llvmHelper.getNewTempVar();
@@ -47,7 +48,7 @@ export function emitMemoryFree_ARM64(platform: ARM64LinuxPlatform, generator: IR
         generator.emit(`${tempVar} = bitcast ${addr.type} ${addr.value} to i8*`);
         addrI8Ptr = tempVar;
     }
-    const sizeI64 = generator.ensureI64(size);
+    const sizeI64 = irgen_utils.ensureI64(generator, size);
 
     // Get aligned size
     const alignedSize = generator.llvmHelper.getNewTempVar();

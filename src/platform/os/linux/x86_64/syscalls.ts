@@ -1,4 +1,5 @@
 import { IRGenerator, type IRValue } from "../../../../generator/ir_generator.js";
+import * as irgen_utils from "../../../../generator/irgen/ir_generator_utils.js";
 import { X86_64LinuxPlatform } from "./platform.js"; // 导入主平台类，以便调用其方法
 
 // 汇编 x86-64 Linux 系统调用的内联汇编
@@ -39,7 +40,7 @@ export function emitSyscall_X86_64(platform: X86_64LinuxPlatform, generator: IRG
     while (syscallArgs.length < 6) syscallArgs.push("0");
 
     const resultVar = generator.llvmHelper.getNewTempVar();
-    const callNumVal = generator.ensureI64(callNum);
+    const callNumVal = irgen_utils.ensureI64(generator, callNum);
     const asmCall = emitSyscallInlineASM_X86_64(generator, callNumVal, syscallArgs); // 直接调用本地函数
 
     generator.emit(`${resultVar} = ${asmCall}`);

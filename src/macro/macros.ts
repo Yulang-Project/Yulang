@@ -1,6 +1,7 @@
 // src/macro/macros.ts
 
 import { IRGenerator, type IRValue } from '../generator/ir_generator.js';
+import * as irgen_utils from '../generator/irgen/ir_generator_utils.js';
 import { LangItems } from '../generator/lang_items.js';
 import { TokenType } from '../token.js'; // NEW
 import { findPredefinedFunction } from '../predefine/funs.js'; // NEW
@@ -71,7 +72,7 @@ export const MACRO_BLOCK_FUNCTIONS: PredefinedFunction[] = [
             }
 
             const baseType = ptrArg.type.slice(0, -1);
-            const coercedValue = generator.coerceValue(valueArg, baseType); // 确保类型匹配
+            const coercedValue = irgen_utils.coerceValue(generator, valueArg, baseType); // 确保类型匹配
 
             generator.emit(`store ${baseType} ${coercedValue.value}, ${ptrArg.type} ${ptrArg.value}, align ${generator.llvmHelper.getAlign(baseType)}`);
 
