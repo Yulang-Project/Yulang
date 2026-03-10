@@ -5,7 +5,9 @@ import {
     DereferenceExpr, 
     TypeAnnotation,
     FunctionLiteralExpr,
-    Parameter
+    Parameter,
+    ArrayLiteralExpr,
+    IndexExpr
 } from '../ast.js';
 import { Parser } from './index.js'; // Import Parser to use it as a type
 
@@ -27,7 +29,7 @@ export class ExpressionParser {
             const equals = this.parser.previous();
             const value = this.assignment();
 
-            if (expr instanceof IdentifierExpr || expr instanceof GetExpr || expr instanceof DereferenceExpr) { // Now DereferenceExpr is a valid target
+            if (expr instanceof IdentifierExpr || expr instanceof GetExpr || expr instanceof DereferenceExpr || expr instanceof IndexExpr) { // Now DereferenceExpr is a valid target
                 return new AssignExpr(expr, value); // expr is now the target
             }
             
@@ -209,6 +211,10 @@ export class ExpressionParser {
             } else if (this.parser.match(TokenType.DOT)) {
                 const name = this.parser.consume(TokenType.IDENTIFIER, "Expect property name after '.'.");
                 expr = new GetExpr(expr, name);
+            } else if (this.parser.match(TokenType.LBRACKET)) {
+                const indexExpr = this.parse();
+                this.parser.consume(TokenType.RBRACKET, "Expect ']' after index expression.");
+                expr = new IndexExpr(expr, indexExpr);
             } else if (this.parser.match(TokenType.AS)) { // NEW: Handle 'as' keyword
                 const asToken = this.parser.previous(); // The 'as' token itself
                 const typeAnnotation = this.parser.typeAnnotation(); // Parse the type after 'as'
@@ -241,7 +247,7 @@ export class ExpressionParser {
         return args;
     }
 
-    // primary        → NUMBER | STRING_LITERAL | IDENTIFIER | "(" expression ")" | CHAR_LITERAL | OBJECT_LITERAL | TRUE | FALSE;
+    // primary        → NUMBER | STRING_LITERAL | IDENTIFIER | "(" expression ")" | CHAR_LITERAL | OBJECT_LITERAL | TRUE | FALSE | ARRAY_LITERAL;
     private primary(): Expr {
         if (this.parser.match(TokenType.NUMBER, TokenType.STRING_LITERAL, TokenType.CHAR_LITERAL)) {
             return new LiteralExpr(this.parser.previous().literal);
@@ -266,6 +272,20 @@ export class ExpressionParser {
             const expr = this.parse();
             this.parser.consume(TokenType.RPAREN, "Expect ')' after expression.");
             return new GroupingExpr(expr);
+        }
+
+        if (this.parser.match(TokenType.LBRACKET)) { // NEW: Array literal
+            const elements: Expr[] = [];
+            if (!this.parser.check(TokenType.RBRACKET)) {
+                do {
+                    if (elements.length >= 255) {
+                        this.parser.error(this.parser.peek(), "Cannot have more than 255 array elements.");
+                    }
+                    elements.push(this.parse());
+                } while (this.parser.match(TokenType.COMMA));
+            }
+            this.parser.consume(TokenType.RBRACKET, "Expect ']' after array literal.");
+            return new ArrayLiteralExpr(elements);
         }
 
         if (this.parser.match(TokenType.LBRACE)) { // NEW: Handle object literal { key: value }

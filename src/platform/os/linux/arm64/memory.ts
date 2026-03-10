@@ -7,6 +7,9 @@ export function emitMemoryAllocate_ARM64(platform: ARM64LinuxPlatform, generator
     // Implements brk syscall (Linux syscall 12)
     // This is a simplified bump allocator. A real mmap would be more complex.
     
+    // Ensure heap is initialized before using @__heap_brk
+    generator.emit(`call void @__heap_init_internal()`);
+
     // Ensure size is i64
     const sizeI64 = generator.ensureI64(size);
 

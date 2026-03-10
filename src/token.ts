@@ -42,6 +42,7 @@ export enum TokenType {
     NEW = 'NEW',
     PUBLIC = 'PUBLIC',
     PRIVATE = 'PRIVATE',
+    STATIC = 'STATIC',
     ARRAY = 'ARRAY', // NEW: Add ARRAY token
     OBJECT = 'OBJECT', // NEW: Add OBJECT token
     POINTER = 'POINTER', // NEW: Add POINTER token
@@ -158,6 +159,7 @@ Object.assign(keywords, {
     'new': TokenType.NEW,
     'public': TokenType.PUBLIC,
     'private': TokenType.PRIVATE,
+    'static': TokenType.STATIC,
     'array': TokenType.ARRAY,
     'object': TokenType.OBJECT, // NEW
     'pointer': TokenType.POINTER,

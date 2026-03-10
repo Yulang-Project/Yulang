@@ -2,6 +2,8 @@
 import { LLVMIRHelper } from './llvm_ir_helpers.js';
 import { LangItems } from './lang_items.js';
 import type { IRValue } from './ir_generator.js';
+import { LLVM } from '../llvm/index.js';
+import type { LLVMValueRef, LLVMTypeRef } from '../llvm/index.js';
 
 /**
  * Attempts to resolve a simple type name (like 'string') to its full LLVM type
@@ -26,41 +28,59 @@ export class BuiltinFunctions {
     /**
      * Generates an alloca instruction.
      */
-    public createAlloca(sizeValue: string, align: number = 16): string {
-        const resultVar = this.helpers.getNewTempVar();
-        return `${resultVar} = alloca i8, i32 ${sizeValue}, align ${align}`;
+    public createAlloca(sizeValue: LLVMValueRef, align: number = 16): LLVMValueRef {
+        const generator = this.helpers.getGenerator();
+        const context = this.helpers.getContext();
+        return LLVM.BuildAlloca(generator.builder, LLVM.Int8TypeInContext(context), "");
     }
 
     /**
      * Generates a call to the llvm.memcpy intrinsic.
      */
-    public createMemcpy(dest: IRValue, src: IRValue, len: IRValue): string {
-        // Call our internal inline memcpy
-        return `call void @__memcpy_inline(i8* ${dest.value}, i8* ${src.value}, i64 ${len.value})`;
+    public createMemcpy(dest: IRValue, src: IRValue, len: IRValue): LLVMValueRef {
+        const generator = this.helpers.getGenerator();
+        const context = this.helpers.getContext();
+        const module = generator.module;
+
+        let memcpyFunc = LLVM.GetNamedFunction(module, "__memcpy_inline");
+        if (!memcpyFunc) {
+            const voidType = LLVM.VoidTypeInContext(context);
+            const i8PtrType = LLVM.PointerType(LLVM.Int8TypeInContext(context), 0);
+            const i64Type = LLVM.Int64TypeInContext(context);
+            const paramTypes = [i8PtrType, i8PtrType, i64Type];
+            const funcType = LLVM.FunctionType(voidType, paramTypes, 3, 0);
+            memcpyFunc = LLVM.AddFunction(module, "__memcpy_inline", funcType);
+        }
+
+        const args = [dest.value, src.value, len.value];
+        const funcType = LLVM.GetElementType(LLVM.TypeOf(memcpyFunc));
+        return LLVM.BuildCall2(generator.builder, funcType, memcpyFunc, args, 3, "");
     }
 
     /**
      * Generates IR to create a string struct on the stack.
-     * @param ptrValue The i8* pointer to the string data.
-     * @param lenValue The i64 length of the string.
-     * @returns An IRValue representing the pointer to the stack-allocated string struct.
      */
-    public createString(ptrValue: string, lenValue: string): IRValue {
-        const resultStructPtr = this.helpers.getNewTempVar();
-        this.helpers.getGenerator().emit(`${resultStructPtr} = alloca ${LangItems.string.structName}, align 8`);
+    public createString(ptrValue: LLVMValueRef, lenValue: LLVMValueRef): IRValue {
+        const generator = this.helpers.getGenerator();
+        const context = this.helpers.getContext();
+        const structType = this.helpers.getLLVMTypeByName(LangItems.string.structName);
+        
+        const resultStructPtr = LLVM.BuildAlloca(generator.builder, structType, "");
 
-        const resPtrField = this.helpers.getNewTempVar();
-        this.helpers.getGenerator().emit(`${resPtrField} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${resultStructPtr}, i32 0, i32 ${LangItems.string.members.ptr.index}`);
-        this.helpers.getGenerator().emit(`store i8* ${ptrValue}, i8** ${resPtrField}, align 8`);
+        const zero = LLVM.ConstInt(LLVM.Int32TypeInContext(context), 0, 0);
+        const ptrIdx = LLVM.ConstInt(LLVM.Int32TypeInContext(context), LangItems.string.members.ptr.index, 0);
+        const lenIdx = LLVM.ConstInt(LLVM.Int32TypeInContext(context), LangItems.string.members.len.index, 0);
 
-        const resLenField = this.helpers.getNewTempVar();
-        this.helpers.getGenerator().emit(`${resLenField} = getelementptr inbounds ${LangItems.string.structName}, ${LangItems.string.structName}* ${resultStructPtr}, i32 0, i32 ${LangItems.string.members.len.index}`);
-        this.helpers.getGenerator().emit(`store i64 ${lenValue}, i64* ${resLenField}, align 8`);
+        const resPtrField = LLVM.BuildInBoundsGEP2(generator.builder, structType, resultStructPtr, [zero, ptrIdx], 2, "");
+        LLVM.BuildStore(generator.builder, ptrValue, resPtrField);
 
-        return { value: resultStructPtr, type: `${LangItems.string.structName}*` };
+        const resLenField = LLVM.BuildInBoundsGEP2(generator.builder, structType, resultStructPtr, [zero, lenIdx], 2, "");
+        LLVM.BuildStore(generator.builder, lenValue, resLenField);
+
+        return { value: resultStructPtr, type: LLVM.PointerType(structType, 0) };
     }
 
     public createPanicOOB(): void {
-        this.helpers.getGenerator().emit(`declare void @__panic_oob()`, false);
+        // no-op
     }
 }

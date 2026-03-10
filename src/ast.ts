@@ -9,6 +9,7 @@ export interface ExprVisitor<R> {
     visitGroupingExpr(expr: GroupingExpr): R;
     visitCallExpr(expr: CallExpr): R;
     visitGetExpr(expr: GetExpr): R;
+    visitIndexExpr(expr: IndexExpr): R;
     visitAssignExpr(expr: AssignExpr): R;
     visitThisExpr(expr: ThisExpr): R;
     visitAsExpr(expr: AsExpr): R; // NEW
@@ -18,6 +19,7 @@ export interface ExprVisitor<R> {
     visitAddressOfExpr(expr: AddressOfExpr): R;
     visitDereferenceExpr(expr: DereferenceExpr): R;
     visitFunctionLiteralExpr(expr: FunctionLiteralExpr): R;
+    visitArrayLiteralExpr(expr: ArrayLiteralExpr): R; // NEW: Add visitArrayLiteralExpr
 }
 
 export interface StmtVisitor<R> {
@@ -94,6 +96,11 @@ export class GetExpr extends Expr {
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitGetExpr(this); }
 }
 
+export class IndexExpr extends Expr {
+    constructor(public array: Expr, public index: Expr) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitIndexExpr(this); }
+}
+
 export class AssignExpr extends Expr {
     constructor(public target: Expr, public value: Expr) { super(); } // Changed name:Token to target:Expr
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitAssignExpr(this); }
@@ -135,6 +142,12 @@ export class FunctionLiteralExpr extends Expr {
         public body: BlockStmt
     ) { super(); }
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitFunctionLiteralExpr(this); }
+}
+
+// NEW: ArrayLiteralExpr for [element, element, ...]
+export class ArrayLiteralExpr extends Expr {
+    constructor(public elements: Expr[]) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitArrayLiteralExpr(this); }
 }
 
 // --- Statements ---
@@ -225,7 +238,8 @@ export class FunctionDeclaration extends Stmt {
         public body: BlockStmt,
         public isExported: boolean = false,
         public visibility: Token, // Add visibility field
-        public capturedVariables: any[] | null = null
+        public capturedVariables: any[] | null = null,
+        public isStatic: boolean = false
     ) { super(); }
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitFunctionDeclaration(this); }
 }
@@ -302,6 +316,7 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
     visitGroupingExpr(expr: GroupingExpr): string { return this.parenthesize("group", expr.expression); }
     visitCallExpr(expr: CallExpr): string { return this.parenthesize("call " + this.print(expr.callee), ...expr.args); }
     visitGetExpr(expr: GetExpr): string { return this.parenthesize("get " + this.print(expr.object) + "." + expr.name.lexeme); }
+    visitIndexExpr(expr: IndexExpr): string { return this.parenthesize("index", expr.array, expr.index); }
     visitAssignExpr(expr: AssignExpr): string { return this.parenthesize("assign " + this.print(expr.target), expr.value); }
     visitThisExpr(expr: ThisExpr): string { return expr.keyword.lexeme; }
 
@@ -344,6 +359,12 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
         return this.parenthesize(`fun literal(${params})${returnType}`, expr.body);
     }
 
+    // NEW: ArrayLiteralExpr
+    visitArrayLiteralExpr(expr: ArrayLiteralExpr): string {
+        const elements = expr.elements.map(e => this.print(e)).join(", ");
+        return this.parenthesize(`array [${elements}]`);
+    }
+
     visitExpressionStmt(stmt: ExpressionStmt): string { return this.parenthesize("expr", stmt.expression); }
     visitLetStmt(stmt: LetStmt): string {
         const typeStr = stmt.type ? `: ${this.printType(stmt.type)}` : '';
@@ -371,7 +392,8 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
             return `${p.name.lexeme}${typeStr}`;
         }).join(" ");
         const returnType = decl.returnType ? `: ${this.printType(decl.returnType)}` : '';
-        return this.parenthesize(`fun ${decl.name.lexeme}(${params})${returnType}`, decl.body);
+        const staticPrefix = decl.isStatic ? 'static ' : '';
+        return this.parenthesize(`${staticPrefix}fun ${decl.name.lexeme}(${params})${returnType}`, decl.body);
     }
     visitClassDeclaration(stmt: ClassDeclaration): string {
         return this.parenthesize(`class ${stmt.name.lexeme}`, ...stmt.properties, ...stmt.methods); // Print methods too

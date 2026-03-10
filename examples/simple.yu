@@ -2,6 +2,13 @@
 
 fun main(): i32 {
   io.output("hello\n");
+  let a: array(i32) = [];
+  a.push(1);
+  a.push(2);
+  a.push(3);
+  io.output(a[0]);
+  io.output(a[1]);
+  io.output(a[2]);
   return 0;
 }
 

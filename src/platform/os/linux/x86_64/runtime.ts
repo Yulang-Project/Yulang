@@ -93,6 +93,15 @@ export function emitLowLevelRuntime_X86_64(platform: X86_64LinuxPlatform, genera
     generator.indentLevel--;
     generator.emit(`}`, false);
     generator.emit(``, false);
+
+    // Out-of-bounds panic: exit(1)
+    generator.emit(`define void @__panic_oob() {`, false);
+    generator.indentLevel++;
+    generator.emit(`call i64 @__syscall6(i64 60, i64 1, i64 0, i64 0, i64 0, i64 0, i64 0)`);
+    generator.emit(`unreachable`);
+    generator.indentLevel--;
+    generator.emit(`}`, false);
+    generator.emit(``, false);
 }
 
 // 发出 x86-64 Linux 平台上的全局定义

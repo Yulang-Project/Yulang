@@ -439,7 +439,13 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             generator.emit(`${elementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${dataPtr}, i64 ${indexValue.value}`);
             
             // Store element value
-            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            let elementToStore = elementValue;
+            if (elementTypeLlvmType.startsWith('%struct.') && !elementTypeLlvmType.endsWith('*') && elementValue.type === `${elementTypeLlvmType}*`) {
+                const loaded = h.getNewTempVar();
+                generator.emit(`${loaded} = load ${elementTypeLlvmType}, ${elementTypeLlvmType}* ${elementValue.value}, align ${h.getAlign(elementTypeLlvmType)}`);
+                elementToStore = { value: loaded, type: elementTypeLlvmType };
+            }
+            const coercedElement = generator.coerceValue(elementToStore, elementTypeLlvmType);
             generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${elementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
 
             return { value: '', type: 'void' }; // Set operations typically return void
@@ -528,7 +534,7 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
 
             generator.emit(`${skipCopyDataLabel}:`, false);
             const oldRawPtr = h.getNewTempVar();
-            generator.emit(`${oldRawPtr} = bitcast ${currentPtr} to i8*`);
+            generator.emit(`${oldRawPtr} = bitcast ${elementPtrType} ${currentPtr} to i8*`);
             const oldAllocSizeForFree = h.getNewTempVar();
             generator.emit(`${oldAllocSizeForFree} = mul i64 ${currentCap}, ${elementSizeI64}`);
             generator.platform.emitMemoryFree(generator, {value: oldRawPtr, type: 'i8*'}, {value: oldAllocSizeForFree, type: 'i64'});
@@ -549,7 +555,13 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             const newElementAddr = h.getNewTempVar();
             generator.emit(`${newElementAddr} = getelementptr inbounds ${elementTypeLlvmType}, ${elementPtrType} ${finalPtr}, i64 ${currentLen}`);
             
-            const coercedElement = generator.coerceValue(elementValue, elementTypeLlvmType);
+            let elementToStore = elementValue;
+            if (elementTypeLlvmType.startsWith('%struct.') && !elementTypeLlvmType.endsWith('*') && elementValue.type === `${elementTypeLlvmType}*`) {
+                const loaded = h.getNewTempVar();
+                generator.emit(`${loaded} = load ${elementTypeLlvmType}, ${elementTypeLlvmType}* ${elementValue.value}, align ${h.getAlign(elementTypeLlvmType)}`);
+                elementToStore = { value: loaded, type: elementTypeLlvmType };
+            }
+            const coercedElement = generator.coerceValue(elementToStore, elementTypeLlvmType);
             generator.emit(`store ${elementTypeLlvmType} ${coercedElement.value}, ${elementPtrType} ${newElementAddr}, align ${h.getAlign(elementTypeLlvmType)}`);
 
             const newLen = h.getNewTempVar();

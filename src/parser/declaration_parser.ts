@@ -18,7 +18,7 @@ export class DeclarationParser {
         this.typeParser = new TypeParser(parser);
     }
 
-    public functionDeclaration(kind: string, isExported: boolean, visibility: Token = new Token(TokenType.PUBLIC, 'public', null, 0, 0)): FunctionDeclaration { // Add visibility parameter
+    public functionDeclaration(kind: string, isExported: boolean, visibility: Token = new Token(TokenType.PUBLIC, 'public', null, 0, 0), isStatic: boolean = false): FunctionDeclaration { // Add visibility parameter
         const name = this.parser.consume(TokenType.IDENTIFIER, `Expect ${kind} name.`);
 
         this.parser.consume(TokenType.LPAREN, `Expect '(' after ${kind} name.`);
@@ -46,7 +46,7 @@ export class DeclarationParser {
         this.parser.consume(TokenType.LBRACE, `Expect '{' before ${kind} body.`);
         const body = this.parser.block();
 
-        return new FunctionDeclaration(name, parameters, returnType, body, isExported, visibility);
+        return new FunctionDeclaration(name, parameters, returnType, body, isExported, visibility, null, isStatic);
     }
 
     public structDeclaration(): StructDeclaration { // NEW: structDeclaration
@@ -191,14 +191,18 @@ export class DeclarationParser {
 
         while (!this.parser.check(TokenType.RBRACE) && !this.parser.isAtEnd()) {
             let visibility: Token | null = null;
+            let isStatic = false;
             if (this.parser.match(TokenType.PUBLIC, TokenType.PRIVATE)) {
                 visibility = this.parser.previous();
             } else {
                 visibility = new Token(TokenType.PUBLIC, 'public', null, this.parser.peek().line, this.parser.peek().column);
             }
+            if (this.parser.match(TokenType.STATIC)) {
+                isStatic = true;
+            }
 
             if (this.parser.match(TokenType.FUN)) {
-                methods.push(this.functionDeclaration("function", false, visibility));
+                methods.push(this.functionDeclaration("function", false, visibility, isStatic));
             } else {
                 properties.push(this.propertyDeclaration(visibility));
             }

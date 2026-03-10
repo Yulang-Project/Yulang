@@ -21,6 +21,13 @@ export class TypeParser {
             return new PointerTypeAnnotation(baseType);
         }
 
+        if (this.parser.match(TokenType.ARRAY)) {
+            this.parser.consume(TokenType.LPAREN, "Expect '(' after 'array'.");
+            const elementType = this.parse();
+            this.parser.consume(TokenType.RPAREN, "Expect ')' after array element type.");
+            return new ArrayTypeAnnotation(elementType);
+        }
+
         if (this.parser.match(TokenType.FUN)) {
             this.parser.consume(TokenType.LPAREN, "Expect '(' after 'fun'.");
             const params: TypeAnnotation[] = [];

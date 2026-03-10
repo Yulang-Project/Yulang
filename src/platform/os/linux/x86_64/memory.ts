@@ -6,7 +6,10 @@ import { emitSyscall_X86_64 } from "./syscalls.js"; // 内存分配需要系统�
 export function emitMemoryAllocate_X86_64(platform: X86_64LinuxPlatform, generator: IRGenerator, size: IRValue): IRValue {
     // 实现使用 brk 系统调用 (Linux 的 syscall 12)
     // 这是一个简化的 bump allocator。真实的 mmap 会更复杂。
-    
+
+    // Ensure heap initialized before using @__heap_brk
+    generator.emit(`call void @__heap_init_internal()`);
+
     // 确保 size 是 i64
     const sizeI64 = generator.ensureI64(size);
 

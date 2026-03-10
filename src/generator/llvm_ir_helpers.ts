@@ -5,22 +5,32 @@ import { Token, TokenType } from "../token.js";
 import { resolveLangItemType } from "./builtins.js";
 import { LangItems } from "./lang_items.js";
 import type { IRValue } from "./ir_generator.js";
+import { LLVM } from "../llvm/index.js";
+import type { LLVMContextRef, LLVMTypeRef, LLVMValueRef } from "../llvm/index.js";
 
 type GlobalStringEntry = {
-    charPtrGlobalName: string; // Name of the global for the char array (e.g., @.str.0)
-    stringStructGlobalName: string; // Name of the global for the %struct.String (e.g., @.string.0)
-    charArrayType: string; // Type of the char array (e.g., [8 x i8])
-    length: number; // Length of the string (excluding null terminator)
-    charPtrDefinition: string; // LLVM IR definition for the char array global
-    stringStructDefinition: string; // LLVM IR definition for the %struct.String global
+    charPtrGlobal: LLVMValueRef; // Global for the char array
+    stringStructGlobal: LLVMValueRef; // Global for the %struct.String
+    charArrayType: LLVMTypeRef;
+    length: number;
 };
 
 export class LLVMIRHelper {
-    private tempVarCounter = 1000;
+    private context: LLVMContextRef;
     private stringConstantCounter = 0;
-    private stringStructConstantCounter = 0; // NEW counter for string struct globals
-    private globalStringStructs: { [key: string]: GlobalStringEntry } = {}; // NEW map to store managed string globals
-    private generator: any; // IRGenerator, but use 'any' to avoid circular dependency
+    private stringStructConstantCounter = 0;
+    private globalStringStructs: { [key: string]: GlobalStringEntry } = {};
+    private generator: any;
+
+    private namedStructs: Map<string, LLVMTypeRef> = new Map();
+
+    constructor() {
+        this.context = LLVM.ContextCreate();
+    }
+
+    public getContext(): LLVMContextRef {
+        return this.context;
+    }
 
     public setGenerator(gen: any) {
         this.generator = gen;
@@ -30,7 +40,6 @@ export class LLVMIRHelper {
         return this.generator;
     }
 
-    // TODO: Make these configurable or deduce from target environment
     public getTargetTriple(): string {
         return this.generator.platform.architecture.getTargetTriple();
     }
@@ -39,73 +48,66 @@ export class LLVMIRHelper {
         return this.generator.platform.architecture.getDataLayout();
     }
 
-    public getNewTempVar(): string {
-        return `%t${this.tempVarCounter++}`;
-    }
-
-    private uniqueNameCounter = 0;
-    public getNewUniqueName(prefix: string): string {
-        return `${prefix}_${this.uniqueNameCounter++}`;
-    }
-
     public createGlobalString(value: string): GlobalStringEntry {
-        if (this.globalStringStructs[value]) { // Check the new map
+        if (this.globalStringStructs[value]) {
             return this.globalStringStructs[value];
         }
 
+        const module = this.generator.getModule();
+        
         // 1. Create the char array global
-        const charPtrGlobalName = `@.str.${this.stringConstantCounter++}`;
-        const cString = value.replace(/\\/g, '\\5C').replace(/"/g, '\\22').replace(/\n/g, '\\0A').replace(/\t/g, '\\09'); // Use hex escapes
-        const rawLength = Buffer.from(value, 'utf8').length; // Actual string length, without null terminator
-        const charArrayType = `[${rawLength + 1} x i8]`; // Type includes null terminator
-        const charPtrDefinition = `${charPtrGlobalName} = private unnamed_addr constant ${charArrayType} c"${cString}\\00", align 1`;
+        const charArray = LLVM.ConstStringInContext(this.context, value, value.length, 0);
+        const charArrayType = LLVM.ArrayType(LLVM.Int8TypeInContext(this.context), value.length + 1);
+        const charPtrGlobal = LLVM.AddGlobal(module, charArrayType, `.str.${this.stringConstantCounter++}`);
+        LLVM.SetInitializer(charPtrGlobal, charArray);
+        LLVM.SetGlobalConstant(charPtrGlobal, 1);
 
         // 2. Create the %struct.String global
-        const stringStructGlobalName = `@.string.${this.stringStructConstantCounter++}`;
-        const llvmStringType = LangItems.string.structName;
+        const stringStructGlobalName = `.string.${this.stringStructConstantCounter++}`;
+        const llvmStringType = this.getLLVMTypeByName(LangItems.string.structName);
         
         // Get the i8* pointer to the start of the char array
-        const charPtrValue = `getelementptr inbounds (${charArrayType}, ${charArrayType}* ${charPtrGlobalName}, i64 0, i64 0)`;
+        const indices = [LLVM.ConstInt(LLVM.Int32TypeInContext(this.context), 0, 0), LLVM.ConstInt(LLVM.Int32TypeInContext(this.context), 0, 0)];
+        const charPtrValue = LLVM.ConstInBoundsGEP2(charArrayType, charPtrGlobal, indices, 2);
         
-        // Define the string struct global
-        const stringStructDefinition = 
-            `${stringStructGlobalName} = private unnamed_addr constant ${llvmStringType} { ` +
-            `i8* ${charPtrValue}, ` + // pointer to char array
-            `i64 ${rawLength}` +     // current length (i64)
-            `}, align 8`; // Alignment for the struct
+        const stringStructVal = LLVM.ConstNamedStruct(llvmStringType, [
+            charPtrValue,
+            LLVM.ConstInt(LLVM.Int64TypeInContext(this.context), value.length, 0)
+        ], 2);
+
+        const stringStructGlobal = LLVM.AddGlobal(module, llvmStringType, stringStructGlobalName);
+        LLVM.SetInitializer(stringStructGlobal, stringStructVal);
+        LLVM.SetGlobalConstant(stringStructGlobal, 1);
 
         const entry: GlobalStringEntry = {
-            charPtrGlobalName,
-            stringStructGlobalName,
+            charPtrGlobal,
+            stringStructGlobal,
             charArrayType,
-            length: rawLength,
-            charPtrDefinition,
-            stringStructDefinition,
+            length: value.length,
         };
-        this.globalStringStructs[value] = entry; // Store in the new map
+        this.globalStringStructs[value] = entry;
 
         return entry;
     }
 
-    public getGlobalStrings(): string[] {
-        // Updated to return both definitions
-        return Object.values(this.globalStringStructs).flatMap(s => [s.charPtrDefinition, s.stringStructDefinition]);
-    }
-
-    public getLLVMType(typeAnnotation: TypeAnnotation | null): string {
-        if (!typeAnnotation) return 'void';
+    public getLLVMType(typeAnnotation: TypeAnnotation | null): LLVMTypeRef {
+        if (!typeAnnotation) return LLVM.VoidTypeInContext(this.context);
 
         if (typeAnnotation instanceof PointerTypeAnnotation) {
-            return `${this.getLLVMType(typeAnnotation.baseType)}*`;
+            return LLVM.PointerType(this.getLLVMType(typeAnnotation.baseType), 0);
         }
 
         if (typeAnnotation instanceof FunctionTypeAnnotation) {
             const paramTypes = typeAnnotation.parameters.map(p => this.getLLVMType(p));
             const returnType = this.getLLVMType(typeAnnotation.returnType);
-            const paramsWithEnv = ['i8*', ...paramTypes].filter(p => p.length > 0);
-            const funcSig = `${returnType} (${paramsWithEnv.join(', ')})*`;
-            // Represent closures uniformly as { func_ptr, env_ptr }*
-            return `{ ${funcSig}, i8* }*`;
+            const paramsWithEnv = [LLVM.PointerType(LLVM.Int8TypeInContext(this.context), 0), ...paramTypes];
+            
+            const funcType = LLVM.FunctionType(returnType, paramsWithEnv, paramsWithEnv.length, 0);
+            const funcPtrType = LLVM.PointerType(funcType, 0);
+
+            // Represent closures uniformly as { func_ptr, env_ptr }
+            const structElements = [funcPtrType, LLVM.PointerType(LLVM.Int8TypeInContext(this.context), 0)];
+            return LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
         }
 
         if (typeAnnotation instanceof ArrayTypeAnnotation) {
@@ -116,124 +118,80 @@ export class LLVMIRHelper {
         if (typeAnnotation instanceof BasicTypeAnnotation) {
             const typeName = typeAnnotation.name.lexeme;
 
-            // 1. Try to resolve as a language item (e.g. "string" -> "%struct.string")
-            const resolvedType = resolveLangItemType(typeName);
-            if (resolvedType) {
-                // For "string", return the struct type itself, not a pointer.
-                // It will be allocated on the stack as a value.
-                return resolvedType;
+            const resolvedLangItem = resolveLangItemType(typeName);
+            if (resolvedLangItem) {
+                return this.getLLVMTypeByName(resolvedLangItem);
             }
             
-            // 2. Fallback to primitive types
             switch (typeName) {
                 case 'int':
-                    return 'i64';
-                case 'i32':
-                    return 'i32';
                 case 'i64':
-                    return 'i64';
+                    return LLVM.Int64TypeInContext(this.context);
+                case 'i32':
+                    return LLVM.Int32TypeInContext(this.context);
                 case 'f32':
-                    return 'f32';
+                    return LLVM.FloatTypeInContext(this.context);
                 case 'f64':
-                    return 'f64';
-                case 'i16': // Added i16 type mapping
-                    return 'i16';
+                    return LLVM.DoubleTypeInContext(this.context);
+                case 'i16':
+                    return LLVM.Int16TypeInContext(this.context);
                 case 'bool':
-                    return 'i1';
+                    return LLVM.Int1TypeInContext(this.context);
                 case 'char':
-                    return 'i8';
+                    return LLVM.Int8TypeInContext(this.context);
                 case 'void':
-                    return 'void';
+                    return LLVM.VoidTypeInContext(this.context);
             }
             
-            // 3. Fallback to assuming it's a user-defined reference type (pointer to struct)
-            //    This will result in '%struct.TypeName*'
-            return `%struct.${typeName}`;
+            return this.getLLVMTypeByName(`struct.${typeName}`);
         }
         
-        return 'void'; // Final fallback
+        return LLVM.VoidTypeInContext(this.context);
     }
 
-    public getAlign(llvmType: string): number {
-        if (llvmType.endsWith('*')) return 8; // Pointers are 8-byte aligned on 64-bit systems
-        if (llvmType === 'i64' || llvmType === 'f64') return 8;
-        if (llvmType === 'i32' || llvmType === 'f32') return 4;
-        if (llvmType === 'i16') return 2;
-        if (llvmType === 'i8' || llvmType === 'i1') return 1;
-        if (llvmType === LangItems.string.structName) return 8; // Alignment for string struct
-        // New: Array struct alignment
-        if (llvmType.startsWith(LangItems.array.structPrefix)) return 8; // Array struct contains a pointer, so 8-byte aligned
-        
-        return 1; // Default to 1-byte alignment
+    public getNewTempVar(): string {
+        return ""; // LLVM C API will auto-generate if name is empty
     }
 
-    public sizeOf(llvmType: string): number {
-        if (llvmType.endsWith('*')) return 8; // Pointers are 8 bytes on 64-bit systems
-        switch (llvmType) {
-            case 'i64':
-            case 'f64':
-                return 8;
-            case 'i32':
-            case 'f32':
-                return 4;
-            case 'i16':
-                return 2;
-            case 'i8':
-            case 'i1':
-                return 1;
-            case LangItems.string.structName:
-                return 16; // string struct is { i8*, i64 } -> 8 + 8 = 16 bytes
-            // New: Array struct size
-            case llvmType.startsWith(LangItems.array.structPrefix) ? llvmType : '': // Check if it's an array struct
-                return 24; // array struct is { T*, i64, i64 } -> 8 + 8 + 8 = 24 bytes
-            default:
-                // For structs, we'd need more complex logic. For now, assume a reasonable default.
-                // For closure environment, we are summing `sizeOf(pointer)`, so this won't be hit for now.
-                return 8; // Default to pointer size as a fallback for unknown types
+    public getNewUniqueName(prefix: string): string {
+        return `${prefix}.${this.stringConstantCounter++}`;
+    }
+
+    public getAlign(llvmType: LLVMTypeRef): number {
+        // This is now less useful since LLVM handles it, but kept for compatibility
+        return 8;
+    }
+
+    public sizeOf(llvmType: LLVMTypeRef): number {
+        return 8;
+    }
+
+    public getPointerType(type: LLVMTypeRef): LLVMTypeRef {
+        return LLVM.PointerType(type, 0);
+    }
+
+    public bitcast(value: IRValue, targetType: LLVMTypeRef): IRValue {
+        const builder = this.generator.builder;
+        const result = LLVM.BuildBitCast(builder, value.value, targetType, "");
+        return { value: result, type: targetType };
+    }
+
+    public getLLVMTypeByName(name: string): LLVMTypeRef {
+        if (this.namedStructs.has(name)) {
+            return this.namedStructs.get(name)!;
         }
+        const structType = LLVM.StructCreateNamed(this.context, name);
+        this.namedStructs.set(name, structType);
+        return structType;
     }
 
-    public getTypeFromIR(irValue: string): string {
-        // This is a heuristic and would be better handled with a proper symbol table in the generator.
-        if (irValue.startsWith('%')) {
-            // Cannot determine type from temp var alone without context.
-            return 'i32'; // Default assumption
-        }
-        
-        const parts = irValue.trim().split(' ');
-        if (parts.length > 0 && parts[0]) {
-            if(parts[0].match(/^(i\d+|f\d+|\%struct\.[a-zA-Z0-9_]+)\*?$/)) {
-                return parts[0];
-            }
-        }
-
-        return 'void'; // Default to void
-    }
-
-    public getPointerType(type: string): string {
-        return `${type}*`;
-    }
-
-    public ensureArrayStructDefinition(elementTypeLlvmType: string): string {
-        // Sanitize the element type name for use in the struct name.
-        // Replace special characters like '%', '*', '.' with '_' and spaces.
-        const sanitizedElementType = elementTypeLlvmType.replace(/[%*.]/g, '_').replace(/ /g, '');
-        const arrayStructName = `${LangItems.array.structPrefix}.${sanitizedElementType}`;
-
-        const ptrType = this.getPointerType(elementTypeLlvmType); // The pointer to the actual array data
-        // Define the array struct: { element_type*, i64 len, i64 cap }
-        const definition = `${arrayStructName} = type { ${ptrType}, i64, i64 }`;
-
-        // Request IRGenerator to emit this definition, ensuring it's only emitted once.
-        // This relies on IRGenerator's emitHoisted to handle deduplication.
-        this.generator.emitHoisted(definition);
-        
-        return arrayStructName;
-    }
-
-    public bitcast(value: IRValue, targetType: string): IRValue {
-        const resultVar = this.getNewTempVar();
-        this.generator.emit(`${resultVar} = bitcast ${value.type} ${value.value} to ${targetType}`);
-        return { value: resultVar, type: targetType };
+    public ensureArrayStructDefinition(elementType: LLVMTypeRef): LLVMTypeRef {
+        const structElements = [
+            LLVM.PointerType(elementType, 0),
+            LLVM.Int64TypeInContext(this.context),
+            LLVM.Int64TypeInContext(this.context)
+        ];
+        return LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
     }
 }
+
