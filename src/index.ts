@@ -31,6 +31,7 @@ cli
   .option('--target <type>', 'Compilation target type: exec (executable), static-lib (static library), declare-file (declaration file), or asm (assembly file)', { default: 'exec' })
   .option('--platform <name>', 'Target platform (e.g., "x86_64-linux", "arm64-linux")', { default: 'x86_64-linux' })
   .action(async (filePath, options) => {
+    console.log(`[DEBUG] Starting compilation for: ${filePath}`);
     const inputFilePath = path.resolve(filePath);
     const outputFilePath = path.resolve(options.output);
     const outputDir = path.dirname(outputFilePath);

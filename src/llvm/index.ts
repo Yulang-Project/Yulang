@@ -87,6 +87,8 @@ export const LLVM = {
     BuildStore: lib.func('LLVMBuildStore', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMValueRef_t]),
     BuildGEP2: lib.func('LLVMBuildGEP2', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMTypeRef_t, LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), 'uint32', 'string']),
     BuildInBoundsGEP2: lib.func('LLVMBuildInBoundsGEP2', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMTypeRef_t, LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), 'uint32', 'string']),
+    BuildStructGEP2: lib.func('LLVMBuildStructGEP2', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMTypeRef_t, LLVMValueRef_t, 'uint32', 'string']),
+    BuildGlobalStringPtr: lib.func('LLVMBuildGlobalStringPtr', LLVMValueRef_t, [LLVMBuilderRef_t, 'string', 'string']),
 
     // 指令构建 - 控制流
     BuildRet: lib.func('LLVMBuildRet', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t]),
@@ -105,6 +107,7 @@ export const LLVM = {
     ConstInBoundsGEP2: lib.func('LLVMConstInBoundsGEP2', LLVMValueRef_t, [LLVMTypeRef_t, LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), 'uint32']),
     ConstGEP2: lib.func('LLVMConstGEP2', LLVMValueRef_t, [LLVMTypeRef_t, LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), 'uint32']),
     ConstBitCast: lib.func('LLVMConstBitCast', LLVMValueRef_t, [LLVMValueRef_t, LLVMTypeRef_t]),
+    ConstPointerNull: lib.func('LLVMConstPointerNull', LLVMValueRef_t, [LLVMTypeRef_t]),
 
     AddGlobal: lib.func('LLVMAddGlobal', LLVMValueRef_t, [LLVMModuleRef_t, LLVMTypeRef_t, 'string']),
     SetInitializer: lib.func('LLVMSetInitializer', 'void', [LLVMValueRef_t, LLVMValueRef_t]),
@@ -114,15 +117,18 @@ export const LLVM = {
     BuildBitCast: lib.func('LLVMBuildBitCast', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
     BuildPtrToInt: lib.func('LLVMBuildPtrToInt', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
     BuildIntToPtr: lib.func('LLVMBuildIntToPtr', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
+    BuildPointerCast: lib.func('LLVMBuildPointerCast', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
     BuildZExt: lib.func('LLVMBuildZExt', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
     BuildSExt: lib.func('LLVMBuildSExt', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
     BuildTrunc: lib.func('LLVMBuildTrunc', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
+    BuildFPCast: lib.func('LLVMBuildFPCast', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMTypeRef_t, 'string']),
 
     // 比较
     BuildICmp: lib.func('LLVMBuildICmp', LLVMValueRef_t, [LLVMBuilderRef_t, 'int', LLVMValueRef_t, LLVMValueRef_t, 'string']),
     BuildFCmp: lib.func('LLVMBuildFCmp', LLVMValueRef_t, [LLVMBuilderRef_t, 'int', LLVMValueRef_t, LLVMValueRef_t, 'string']),
 
     // 其他
+    GetInlineAsm: lib.func('LLVMGetInlineAsm', LLVMValueRef_t, [LLVMTypeRef_t, 'string', 'uint32', 'string', 'uint32', 'int', 'int', 'int', 'uint32']),
     SetTarget: lib.func('LLVMSetTarget', 'void', [LLVMModuleRef_t, 'string']),
     SetDataLayout: lib.func('LLVMSetDataLayout', 'void', [LLVMModuleRef_t, 'string']),
 

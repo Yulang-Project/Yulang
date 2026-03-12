@@ -1,0 +1,2344 @@
+// src/generator/ir_generator.ts
+import { ASTNode, Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, IndexExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, AddressOfExpr, DereferenceExpr, FunctionLiteralExpr, ArrayLiteralExpr, Stmt, ExpressionStmt, BlockStmt, LetStmt, ConstStmt, IfStmt, WhileStmt, ReturnStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, ImportStmt, DeclareFunction, TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, UsingStmt, PointerTypeAnnotation, FunctionTypeAnnotation } from '../ast.js';
+import { Token, TokenType } from '../token.js';
+import { LLVMIRHelper } from './llvm_ir_helpers.js';
+import { Parser } from '../parser/index.js'; // Added Parser import
+import * as path from 'path'; // Added path import
+import * as process from 'process'; // Added process import
+import { BuiltinFunctions } from './builtins.js';
+import { LangItems } from './lang_items.js';
+import { findPredefinedFunction } from '../predefine/funs.js';
+import { LLVM, LLVMIntPredicate, LLVMTypeKind } from '../llvm/index.js';
+// Represents a single scope (e.g., a function body, an if-block)
+class Scope {
+    parent;
+    depth;
+    symbols = new Map();
+    constructor(parent = null, depth = 0) {
+        this.parent = parent;
+        this.depth = depth;
+    }
+    define(name, entry) {
+        if (this.symbols.has(name)) {
+            return false; // Variable already defined in this scope
+        }
+        this.symbols.set(name, entry);
+        return true;
+    }
+    find(name) {
+        return this.symbols.get(name) || this.parent?.find(name) || null;
+    }
+}
+class CapturedVariableInfo {
+    name;
+    llvmType;
+    ptr;
+    definedInScopeDepth;
+    constructor(name, llvmType, ptr, definedInScopeDepth) {
+        this.name = name;
+        this.llvmType = llvmType;
+        this.ptr = ptr;
+        this.definedInScopeDepth = definedInScopeDepth;
+    }
+}
+// 辅助访问者，用于在函数体中查找捕获的变量
+class ClosureAnalyzer {
+    captured = new Map();
+    outerScopeAtLiteralDefinition; // 闭包字面量定义时的外部作用域
+    functionBodyScopeDepth; // 闭包函数体将创建的作用域的深度
+    constructor(outerScopeAtLiteralDefinition, functionBodyScopeDepth) {
+        this.outerScopeAtLiteralDefinition = outerScopeAtLiteralDefinition;
+        this.functionBodyScopeDepth = functionBodyScopeDepth;
+    }
+    getCapturedVariables() {
+        return Array.from(this.captured.values());
+    }
+    resolveIdentifierAndCaptureIfNecessary(name) {
+        // 从闭包字面量定义时的外部作用域开始向上查找
+        let currentSearchScope = this.outerScopeAtLiteralDefinition;
+        while (currentSearchScope) {
+            const entry = currentSearchScope.find(name); // 使用公共的 find 方法
+            if (entry) {
+                // 找到了一个符号。判断它是否需要被捕获。
+                // 如果它在外部作用域定义 (definedInScopeDepth < 闭包函数体作用域深度)
+                // 并且它不是全局变量 (definedInScopeDepth > 0)
+                if (entry.definedInScopeDepth < this.functionBodyScopeDepth &&
+                    entry.definedInScopeDepth > 0) {
+                    if (!this.captured.has(name)) {
+                        this.captured.set(name, new CapturedVariableInfo(name, entry.llvmType, entry.ptr, entry.definedInScopeDepth));
+                    }
+                }
+                return; // 找到了（无论是局部、全局还是捕获的），停止搜索
+            }
+            currentSearchScope = currentSearchScope.parent;
+        }
+        // 如果在任何作用域中都未找到，则它是一个未声明的标识符。
+        // 此访问者仅识别 *捕获的* 变量，不处理一般的语义错误。
+        // 语义分析阶段会处理未声明的变量。
+    }
+    // --- ExprVisitor ---
+    visitLiteralExpr(expr) { }
+    visitBinaryExpr(expr) { expr.left.accept(this); expr.right.accept(this); }
+    visitUnaryExpr(expr) { expr.right.accept(this); }
+    visitAddressOfExpr(expr) { expr.expression.accept(this); }
+    visitDereferenceExpr(expr) { expr.expression.accept(this); }
+    visitGroupingExpr(expr) { expr.expression.accept(this); }
+    visitCallExpr(expr) { expr.callee.accept(this); expr.args.forEach(arg => arg.accept(this)); }
+    visitGetExpr(expr) { expr.object.accept(this); }
+    visitIndexExpr(expr) { expr.array.accept(this); expr.index.accept(this); }
+    visitAssignExpr(expr) { expr.target.accept(this); expr.value.accept(this); }
+    visitThisExpr(expr) { }
+    visitAsExpr(expr) { expr.expression.accept(this); }
+    visitObjectLiteralExpr(expr) { expr.properties.forEach(v => v.accept(this)); }
+    visitNewExpr(expr) { expr.callee.accept(this); expr.args.forEach(arg => arg.accept(this)); }
+    visitDeleteExpr(expr) { expr.target.accept(this); }
+    visitFunctionLiteralExpr(expr) { }
+    visitArrayLiteralExpr(expr) { expr.elements.forEach(e => e.accept(this)); }
+    visitIdentifierExpr(expr) {
+        this.resolveIdentifierAndCaptureIfNecessary(expr.name.lexeme);
+    }
+    // --- StmtVisitor ---
+    visitExpressionStmt(stmt) { stmt.expression.accept(this); }
+    visitBlockStmt(stmt) { stmt.statements.forEach(s => s.accept(this)); }
+    visitLetStmt(stmt) {
+        if (stmt.initializer)
+            stmt.initializer.accept(this);
+        // 此处的 LetStmt 定义了局部变量，这些局部变量不会被外部捕获，
+        // 但它们的值可能依赖于外部变量，因此需要解析初始化器。
+    }
+    visitConstStmt(stmt) {
+        if (stmt.initializer)
+            stmt.initializer.accept(this);
+    }
+    visitIfStmt(stmt) {
+        stmt.condition.accept(this);
+        stmt.thenBranch.accept(this);
+        if (stmt.elseBranch)
+            stmt.elseBranch.accept(this);
+    }
+    visitWhileStmt(stmt) { stmt.condition.accept(this); stmt.body.accept(this); }
+    visitReturnStmt(stmt) { if (stmt.value)
+        stmt.value.accept(this); }
+    // 其他语句通过其表达式或不包含可捕获的标识符
+    visitFunctionDeclaration(decl) { } // 此分析器用于字面量，而非声明
+    visitClassDeclaration(decl) { }
+    visitStructDeclaration(decl) { }
+    visitPropertyDeclaration(stmt) { if (stmt.initializer)
+        stmt.initializer.accept(this); }
+    visitImportStmt(stmt) { }
+    visitDeclareFunction(decl) { }
+    visitUsingStmt(stmt) { }
+}
+export class IRGenerator {
+    builder;
+    module;
+    indentLevel = 0;
+    llvmHelper = new LLVMIRHelper();
+    builtins;
+    globalScope = new Scope(null, 0);
+    currentScope = this.globalScope;
+    currentFunction = null;
+    labelCounter = 0;
+    classDefinitions = new Map();
+    declaredSymbols = new Set(); // NEW: Track declared symbols
+    generatedFunctions = new Set(); // Track emitted function definitions
+    sretPointer = null; // 用于存储结构体返回的隐式 SRET 指针
+    // private ctors: string[] = []; // No longer needed for global_ctors
+    parser;
+    mangleStdLib;
+    sourceFilePath; // New field
+    debug; // NEW: Debug flag
+    pass = 'declaration'; // NEW: Compiler pass flag
+    objectLiteralCounter = 0;
+    objectLiteralExpectedStructType = null; // Expected struct type for literal contexts
+    arrayLiteralExpectedStructType = null; // Expected array struct type for array literals
+    heapGlobalsEmitted = false;
+    lowLevelRuntimeEmitted = false;
+    moduleObjects = new Map();
+    hoistedDefinitions = []; // Type/const definitions emitted inside functions that must live at module scope
+    hoistedFunctions = []; // Full function definitions emitted while inside another function
+    platform; // NEW: Platform abstraction interface
+    emittedArrayStructs = new Set(); // NEW: Track emitted array struct types
+    getModule() {
+        return this.module;
+    }
+    // Splits a LLVM struct type string "{ T1, T2, ... }" into its top-level fields safely (ignoring nested commas).
+    splitStructFields(structType) {
+        const trimmed = structType.trim();
+        const withoutBraces = (trimmed.startsWith('{') && trimmed.endsWith('}'))
+            ? trimmed.slice(1, -1)
+            : trimmed;
+        const fields = [];
+        let current = '';
+        let depth = 0;
+        for (const ch of withoutBraces) {
+            if (ch === ',' && depth === 0) {
+                if (current.trim().length > 0)
+                    fields.push(current.trim());
+                current = '';
+                continue;
+            }
+            if (ch === '(' || ch === '{' || ch === '[')
+                depth++;
+            if (ch === ')' || ch === '}' || ch === ']')
+                depth = Math.max(0, depth - 1);
+            current += ch;
+        }
+        if (current.trim().length > 0)
+            fields.push(current.trim());
+        return fields;
+    }
+    emitHoisted(def) {
+        if (!this.hoistedDefinitions.includes(def)) {
+            this.hoistedDefinitions.push(def);
+        }
+    }
+    hoistFunctionDefinition(lines) {
+        if (lines.length > 0)
+            this.hoistedFunctions.push(lines);
+    }
+    constructor(platform, parser, mangleStdLib = true, sourceFilePath = '', debug = false) {
+        this.platform = platform; // Accept sourceFilePath parameter
+        this.parser = parser;
+        this.mangleStdLib = mangleStdLib;
+        this.sourceFilePath = sourceFilePath; // Initialize new field
+        this.debug = debug; // Initialize new debug flag
+        this.builtins = new BuiltinFunctions(this.llvmHelper);
+        this.llvmHelper.setGenerator(this); // Set back-reference for helpers
+        this.module = LLVM.ModuleCreateWithNameInContext(sourceFilePath, this.llvmHelper.getContext());
+        this.builder = LLVM.CreateBuilderInContext(this.llvmHelper.getContext());
+        LLVM.SetTarget(this.module, this.platform.getTargetTriple());
+        LLVM.SetDataLayout(this.module, this.platform.getDataLayout());
+        this.emitLangItemStructs();
+        this.builtins.createPanicOOB(); // Ensure __panic_oob is declared
+        this.emitLowLevelRuntime();
+        this.emitHeapGlobals();
+    }
+    getGlobalSymbol(name) {
+        return this.globalScope.find(name);
+    }
+    generate(nodes) {
+        this.emitGlobalDefinitions(nodes);
+        if (this.debug)
+            console.log("Starting IR generation, global scope depth:", this.globalScope.depth);
+        nodes.forEach(node => {
+            if (node instanceof FunctionDeclaration) {
+                if (this.debug)
+                    console.log("Processing top-level FunctionDeclaration:", node.name.lexeme);
+                node.accept(this);
+            }
+            else if (node instanceof LetStmt || node instanceof ConstStmt || node instanceof ImportStmt || node instanceof DeclareFunction) {
+                node.accept(this);
+            }
+        });
+        // Insert hoisted definitions (e.g., closure env structs or nested functions) before the first function definition
+        if (this.hoistedDefinitions.length > 0 || this.hoistedFunctions.length > 0) {
+            const insertionIndex = this.builder.findIndex(line => line.trim().startsWith('define '));
+            const insertAt = insertionIndex >= 0 ? insertionIndex : this.builder.length;
+            const hoistedFunctionsFlat = this.hoistedFunctions.flat();
+            const hoisted = [...this.hoistedDefinitions, ...hoistedFunctionsFlat];
+            this.builder = [
+                ...this.builder.slice(0, insertAt),
+                ...hoisted,
+                ...this.builder.slice(insertAt),
+            ];
+        }
+        // Add all accumulated global string definitions at the end
+        this.llvmHelper.getGlobalStrings().forEach(def => {
+            if (!this.builder.includes(def)) {
+                this.builder.push(def);
+            }
+        });
+        // Add global constructors if any - No longer needed, as we're statically linking stdlib
+        // if (this.ctors.length > 0) {
+        //     const ctorEntries = this.ctors.map(ctor => `{ i32 65535, void ()* ${ctor}, i8* null }`).join(', ');
+        //     this.emit(`@llvm.global_ctors = appending global [${this.ctors.length} x { i32, void ()*, i8* }] [${ctorEntries}]`, false);
+        // }
+        return this.builder.join('\n');
+    }
+    emitGlobalDefinitions(nodes) {
+        const functions = [];
+        // 先处理导入和类型定义，确保模块和类型可见；收集函数
+        nodes.forEach(node => {
+            if (node instanceof ImportStmt) {
+                this.visitImportStmt(node);
+            }
+            else if (node instanceof ClassDeclaration || node instanceof StructDeclaration) {
+                node.accept(this);
+            }
+            else if (node instanceof FunctionDeclaration) {
+                functions.push(node);
+            }
+            else if (node instanceof DeclareFunction) {
+                this.visitDeclareFunction(node); // declare 函数直接发出声明
+            }
+        });
+        // 第二遍：先声明所有函数符号（防止调用时未定义）
+        functions.forEach(fn => {
+            const key = this.getFunctionKey(fn);
+            if (!this.declaredSymbols.has(key)) {
+                this.declareFunctionSymbol(fn);
+                this.declaredSymbols.add(key);
+            }
+        });
+        // 第三遍：发出函数定义
+        functions.forEach(fn => {
+            const key = this.getFunctionKey(fn);
+            if (!this.generatedFunctions.has(key)) {
+                this.emitFunctionDefinition(fn);
+                this.generatedFunctions.add(key);
+            }
+        });
+        this.builder.push("");
+    }
+    enterScope() {
+        this.currentScope = new Scope(this.currentScope, this.currentScope.depth + 1);
+    }
+    exitScope() {
+        if (this.currentScope.parent) {
+            this.currentScope = this.currentScope.parent;
+        }
+    }
+    getNewLabel(prefix) {
+        return `${prefix}.${this.labelCounter++}`;
+    }
+    emit(ir, indent = true) {
+        if (this.debug && ir)
+            console.log(`[EMIT LEGACY] ${ir}`);
+    }
+    ensureSyscallDecl() {
+        // legacy no-op; syscall impl emitted in emitLowLevelRuntime
+    }
+    ensureHeapGlobals() {
+        // No-op; globals emitted once in emitHeapGlobals
+    }
+    emitHeapGlobals() {
+        if (this.heapGlobalsEmitted)
+            return;
+        this.heapGlobalsEmitted = true;
+        this.platform.emitGlobalDefinitions(this);
+    }
+    emitLowLevelRuntime() {
+        if (this.lowLevelRuntimeEmitted)
+            return;
+        this.lowLevelRuntimeEmitted = true;
+        this.platform.emitLowLevelRuntime(this);
+    }
+    ensureI64(irValue) {
+        const context = this.llvmHelper.getContext();
+        const i64Type = LLVM.Int64TypeInContext(context);
+        const typeKind = LLVM.GetTypeKind(irValue.type);
+        if (typeKind === 8) { // LLVMIntegerTypeKind
+            const width = LLVM.GetIntTypeWidth(irValue.type);
+            if (width === 64)
+                return irValue.value;
+            if (width === 1)
+                return LLVM.BuildZExt(this.builder, irValue.value, i64Type, "");
+            return LLVM.BuildSExt(this.builder, irValue.value, i64Type, "");
+        }
+        if (typeKind === 12) { // LLVMPointerTypeKind
+            return LLVM.BuildPtrToInt(this.builder, irValue.value, i64Type, "");
+        }
+        throw new Error(`Cannot convert type ${irValue.type} to i64.`);
+    }
+    getFunctionKey(decl) {
+        return `${this.sourceFilePath}:${decl.name.lexeme}`;
+    }
+    emitLangItemStructs() {
+        const context = this.llvmHelper.getContext();
+        // string struct
+        if (!this.classDefinitions.has(LangItems.string.className)) {
+            const structType = LLVM.StructCreateNamed(context, LangItems.string.structName);
+            const elements = [
+                LLVM.PointerType(LLVM.Int8TypeInContext(context), 0),
+                LLVM.Int64TypeInContext(context)
+            ];
+            LLVM.StructSetBody(structType, elements, elements.length, 0);
+            const members = new Map([
+                ['ptr', { llvmType: elements[0], index: LangItems.string.members.ptr.index }],
+                ['len', { llvmType: elements[1], index: LangItems.string.members.len.index }],
+            ]);
+            this.classDefinitions.set(LangItems.string.className, {
+                llvmType: structType,
+                members,
+                methods: new Map(),
+                staticMethods: new Map()
+            });
+        }
+        // object base struct (empty, used for built-in object)
+        if (!this.classDefinitions.has(LangItems.object.typeName)) {
+            const structType = LLVM.StructCreateNamed(context, LangItems.object.structName);
+            LLVM.StructSetBody(structType, [], 0, 0);
+            this.classDefinitions.set(LangItems.object.typeName, {
+                llvmType: structType,
+                members: new Map(),
+                methods: new Map(),
+                staticMethods: new Map()
+            });
+        }
+    }
+    buildModuleObject(fullModulePath) {
+        if (this.moduleObjects.has(fullModulePath))
+            return;
+        const moduleStatements = this.parser.moduleDeclarations.get(fullModulePath);
+        if (!moduleStatements) {
+            throw new Error(`Module statements not found for path: ${fullModulePath}`);
+        }
+        const relativeModulePath = path.relative(process.cwd(), fullModulePath);
+        const moduleNamePart = relativeModulePath.replace(/\.yu$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
+        const structName = `%struct.module_${moduleNamePart}`;
+        const globalName = `@module_${moduleNamePart}`;
+        const members = new Map();
+        const fieldTypes = [];
+        const initValues = [];
+        // First pass: Process nested imports to ensure their module objects are built and available
+        moduleStatements.forEach(stmt => {
+            if (stmt instanceof ImportStmt) {
+                this.visitImportStmt(stmt);
+            }
+        });
+        // Emit struct/class definitions inside module so types are known
+        moduleStatements.forEach(stmt => {
+            if (stmt instanceof StructDeclaration) {
+                this.visitStructDeclaration(stmt);
+            }
+            else if (stmt instanceof ClassDeclaration) {
+                this.visitClassDeclaration(stmt);
+            }
+        });
+        let index = 0;
+        moduleStatements.forEach(stmt => {
+            if (stmt instanceof FunctionDeclaration) { // Handle exported functions
+                if (!stmt.isExported)
+                    return; // Only process exported functions
+                const originalFuncName = stmt.name.lexeme;
+                const mangledName = `_mod_${moduleNamePart}_${originalFuncName}`;
+                const fullName = `@${mangledName}`;
+                const llvmReturnType = this.llvmHelper.getLLVMType(stmt.returnType);
+                const paramTypes = stmt.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+                const isSret = llvmReturnType.startsWith('%struct.') && !llvmReturnType.endsWith('*');
+                const funcParamTypes = isSret ? [`${llvmReturnType}*`, ...paramTypes] : paramTypes;
+                const funcType = isSret
+                    ? `void (${funcParamTypes.join(', ')})*`
+                    : `${llvmReturnType} (${funcParamTypes.join(', ')})*`;
+                if (!this.generatedFunctions.has(`${fullModulePath}.${originalFuncName}`)) {
+                    const savedPath = this.sourceFilePath;
+                    const savedMangleFlag = this.mangleStdLib;
+                    this.sourceFilePath = fullModulePath;
+                    this.mangleStdLib = false;
+                    this.visitFunctionDeclaration(stmt);
+                    this.sourceFilePath = savedPath;
+                    this.mangleStdLib = savedMangleFlag;
+                    this.generatedFunctions.add(`${fullModulePath}.${originalFuncName}`);
+                }
+                members.set(originalFuncName, { llvmType: funcType, index, ptr: fullName });
+                fieldTypes.push(funcType);
+                initValues.push(`${funcType} ${fullName}`);
+                index++;
+            }
+            else if (stmt instanceof DeclareFunction) { // Declare functions are implicitly external/exported
+                const originalFuncName = stmt.name.lexeme;
+                const mangledName = `_mod_${moduleNamePart}_${originalFuncName}`;
+                const fullName = `@${mangledName}`;
+                const llvmReturnType = this.llvmHelper.getLLVMType(stmt.returnType);
+                const paramTypes = stmt.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+                const isSret = llvmReturnType.startsWith('%struct.') && !llvmReturnType.endsWith('*');
+                const funcParamTypes = isSret ? [`${llvmReturnType}*`, ...paramTypes] : paramTypes;
+                const funcType = isSret
+                    ? `void (${funcParamTypes.join(', ')})*`
+                    : `${llvmReturnType} (${funcParamTypes.join(', ')})*`;
+                // For DeclareFunction, we always emit a declare statement.
+                if (isSret) {
+                    const sretAlign = this.llvmHelper.getAlign(llvmReturnType);
+                    const paramsString = [`ptr sret(${llvmReturnType}) align ${sretAlign}`, ...paramTypes].filter(p => p.length > 0).join(', ');
+                    this.emit(`declare void ${fullName}(${paramsString})`, false);
+                }
+                else {
+                    const paramsString = paramTypes.join(', ');
+                    this.emit(`declare ${llvmReturnType} ${fullName}(${paramsString})`, false);
+                }
+                members.set(originalFuncName, { llvmType: funcType, index, ptr: fullName });
+                fieldTypes.push(funcType);
+                initValues.push(`${funcType} ${fullName}`);
+                index++;
+            }
+            else if (stmt instanceof ClassDeclaration) { // Handle exported classes
+                if (!stmt.isExported)
+                    return; // Only process exported classes
+                const className = stmt.name.lexeme;
+                const structType = `%struct.${className}`;
+                const classPtrType = `${structType}*`; // Modules can expose class types as pointers to their struct representation
+                // Ensure the class definition itself is emitted
+                this.visitClassDeclaration(stmt);
+                // Add the class type to module members
+                // The 'ptr' here can be the struct name itself for lookup, or a global variable representing the class metadata.
+                // For now, let's use the struct name as the 'ptr'.
+                members.set(className, { llvmType: classPtrType, index, ptr: structType });
+                fieldTypes.push(classPtrType);
+                // For initValue, it's typically null or a reference to a type descriptor if LLVM IR had such a concept directly.
+                // Using 'null' for now as a placeholder for the type itself.
+                initValues.push(`${classPtrType} null`);
+                index++;
+            }
+            else if (stmt instanceof StructDeclaration) { // Handle exported structs
+                if (!stmt.isExported)
+                    return; // Only process exported structs
+                const structName = stmt.name.lexeme;
+                const structLlvmType = `%struct.${structName}`;
+                const structPtrType = `${structLlvmType}*`;
+                // Ensure the struct definition itself is emitted
+                this.visitStructDeclaration(stmt);
+                // Add the struct type to module members
+                members.set(structName, { llvmType: structPtrType, index, ptr: structLlvmType });
+                fieldTypes.push(structPtrType);
+                initValues.push(`${structPtrType} null`);
+                index++;
+            }
+        });
+        this.emit(`${structName} = type { ${fieldTypes.join(', ')} }`, false);
+        this.emit(`${globalName} = internal global ${structName} { ${initValues.join(', ')} }`, false);
+        this.moduleObjects.set(fullModulePath, {
+            structName,
+            globalName,
+            members,
+            initialized: true
+        });
+    }
+    concatStrings(left, right) {
+        const context = this.llvmHelper.getContext();
+        const stringStructType = this.llvmHelper.getLLVMTypeByName(LangItems.string.structName);
+        const i64Type = LLVM.Int64TypeInContext(context);
+        const i32Type = LLVM.Int32TypeInContext(context);
+        const i8PtrType = LLVM.PointerType(LLVM.Int8TypeInContext(context), 0);
+        // Load lengths
+        const leftLenIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.len.index, 0)];
+        const leftLenPtr = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, left.value, leftLenIndices, 2, "");
+        const leftLen = LLVM.BuildLoad2(this.builder, i64Type, leftLenPtr, "");
+        const rightLenIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.len.index, 0)];
+        const rightLenPtr = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, right.value, rightLenIndices, 2, "");
+        const rightLen = LLVM.BuildLoad2(this.builder, i64Type, rightLenPtr, "");
+        // Compute total length
+        const totalLen = LLVM.BuildAdd(this.builder, leftLen, rightLen, "");
+        // Allocate buffer via platform's memory allocate
+        const one = LLVM.ConstInt(i64Type, 1, 0);
+        const totalLenWithNull = LLVM.BuildAdd(this.builder, totalLen, one, "");
+        const sizeToAlloc = { value: totalLenWithNull, type: i64Type };
+        const allocResult = this.platform.emitMemoryAllocate(this, sizeToAlloc);
+        const destPtr = allocResult.value;
+        // Copy left
+        const leftPtrIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.ptr.index, 0)];
+        const leftDataPtrPtr = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, left.value, leftPtrIndices, 2, "");
+        const leftDataPtr = LLVM.BuildLoad2(this.builder, i8PtrType, leftDataPtrPtr, "");
+        this.builtins.emitMemcpy({ value: destPtr, type: i8PtrType }, { value: leftDataPtr, type: i8PtrType }, { value: leftLen, type: i64Type });
+        // Copy right to dest + leftLen
+        const destRight = LLVM.BuildInBoundsGEP2(this.builder, LLVM.Int8TypeInContext(context), destPtr, [leftLen], 1, "");
+        const rightPtrIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.ptr.index, 0)];
+        const rightDataPtrPtr = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, right.value, rightPtrIndices, 2, "");
+        const rightDataPtr = LLVM.BuildLoad2(this.builder, i8PtrType, rightDataPtrPtr, "");
+        this.builtins.emitMemcpy({ value: destRight, type: i8PtrType }, { value: rightDataPtr, type: i8PtrType }, { value: rightLen, type: i64Type });
+        // Add null terminator
+        const nullTerminatorPtr = LLVM.BuildInBoundsGEP2(this.builder, LLVM.Int8TypeInContext(context), destPtr, [totalLen], 1, "");
+        LLVM.BuildStore(this.builder, LLVM.ConstInt(LLVM.Int8TypeInContext(context), 0, 0), nullTerminatorPtr);
+        // Build result string struct on stack
+        const resultStructPtr = LLVM.BuildAlloca(this.builder, stringStructType, "");
+        const resPtrIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.ptr.index, 0)];
+        const resPtrField = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, resultStructPtr, resPtrIndices, 2, "");
+        LLVM.BuildStore(this.builder, destPtr, resPtrField);
+        const resLenIndices = [LLVM.ConstInt(i32Type, 0, 0), LLVM.ConstInt(i32Type, LangItems.string.members.len.index, 0)];
+        const resLenField = LLVM.BuildInBoundsGEP2(this.builder, stringStructType, resultStructPtr, resLenIndices, 2, "");
+        LLVM.BuildStore(this.builder, totalLen, resLenField);
+        return { value: resultStructPtr, type: LLVM.PointerType(stringStructType, 0) };
+    }
+    // Ensure an IRValue representing a string is a pointer to the string struct.
+    ensureStringPointer(val) {
+        const structType = LangItems.string.structName;
+        const ptrType = `${structType}*`;
+        if (val.type === ptrType)
+            return val;
+        if (val.type === structType) {
+            const tmpPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${tmpPtr} = alloca ${structType}, align ${this.llvmHelper.getAlign(structType)}`);
+            this.emit(`store ${structType} ${val.value}, ${structType}* ${tmpPtr}, align ${this.llvmHelper.getAlign(structType)}`);
+            return { value: tmpPtr, type: ptrType };
+        }
+        return null;
+    }
+    ensureArrayPointer(val) {
+        if (val.type.endsWith('*') && val.type.startsWith(LangItems.array.structPrefix)) {
+            return { ptr: val.value, structType: val.type.slice(0, -1) };
+        }
+        if (val.type.startsWith(LangItems.array.structPrefix)) {
+            if (val.address) {
+                return { ptr: val.address, structType: val.type };
+            }
+            const tmpPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${tmpPtr} = alloca ${val.type}, align ${this.llvmHelper.getAlign(val.type)}`);
+            this.emit(`store ${val.type} ${val.value}, ${val.type}* ${tmpPtr}, align ${this.llvmHelper.getAlign(val.type)}`);
+            return { ptr: tmpPtr, structType: val.type };
+        }
+        throw new Error(`Expected array value, got '${val.type}'.`);
+    }
+    coerceValue(value, targetType) {
+        if (value.type === targetType)
+            return value;
+        const converted = this.llvmHelper.getNewTempVar();
+        const srcType = value.type;
+        const dstType = targetType;
+        const isSrcInt = srcType.startsWith('i') && !srcType.endsWith('*');
+        const isDstInt = dstType.startsWith('i') && !dstType.endsWith('*');
+        const isSrcFloat = srcType.startsWith('f');
+        const isDstFloat = dstType.startsWith('f');
+        const isSrcPtr = srcType.endsWith('*');
+        const isDstPtr = dstType.endsWith('*');
+        if (isSrcInt && isDstInt) {
+            const srcBits = parseInt(srcType.slice(1), 10);
+            const dstBits = parseInt(dstType.slice(1), 10);
+            if (dstBits > srcBits) {
+                this.emit(`${converted} = sext ${srcType} ${value.value} to ${dstType}`);
+            }
+            else if (dstBits < srcBits) {
+                this.emit(`${converted} = trunc ${srcType} ${value.value} to ${dstType}`);
+            }
+            else {
+                this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+            }
+        }
+        else if (isSrcFloat && isDstFloat) {
+            const srcBits = parseInt(srcType.slice(1), 10);
+            const dstBits = parseInt(dstType.slice(1), 10);
+            if (dstBits > srcBits) {
+                this.emit(`${converted} = fpext ${srcType} ${value.value} to ${dstType}`);
+            }
+            else if (dstBits < srcBits) {
+                this.emit(`${converted} = fptrunc ${srcType} ${value.value} to ${dstType}`);
+            }
+            else {
+                this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+            }
+        }
+        else if (isSrcInt && isDstFloat) {
+            this.emit(`${converted} = sitofp ${srcType} ${value.value} to ${dstType}`);
+        }
+        else if (isSrcFloat && isDstInt) {
+            this.emit(`${converted} = fptosi ${srcType} ${value.value} to ${dstType}`);
+        }
+        else if (isSrcPtr && isDstPtr) {
+            this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+        }
+        else if (isSrcInt && isDstPtr) {
+            this.emit(`${converted} = inttoptr ${srcType} ${value.value} to ${dstType}`);
+        }
+        else if (isSrcPtr && isDstInt) {
+            this.emit(`${converted} = ptrtoint ${srcType} ${value.value} to ${dstType}`);
+        }
+        else {
+            this.emit(`${converted} = bitcast ${srcType} ${value.value} to ${dstType}`);
+        }
+        return { value: converted, type: targetType };
+    }
+    // --- Expression Visitor methods ---
+    visitAddressOfExpr(expr) {
+        // Evaluate the inner expression to get its storage location
+        // This is typically for local variables (alloca'd) or global variables
+        if (expr.expression instanceof IdentifierExpr) {
+            const varName = expr.expression.name.lexeme;
+            const entry = this.currentScope.find(varName);
+            if (!entry) {
+                throw new Error(`无法获取未声明变量 '${varName}' 的地址。`);
+            }
+            const ptrType = `${entry.llvmType}*`;
+            const asInt = this.llvmHelper.getNewTempVar();
+            this.emit(`${asInt} = ptrtoint ${ptrType} ${entry.ptr} to i64`);
+            return { value: asInt, type: 'i64', ptr: entry.ptr, ptrType };
+        }
+        else if (expr.expression instanceof GetExpr) {
+            // Getting address of a property, e.g., &obj.prop
+            const objectInfo = expr.expression.object.accept(this);
+            const memberName = expr.expression.name.lexeme;
+            const isPointer = objectInfo.type.endsWith('*');
+            const baseType = isPointer ? objectInfo.type.slice(0, -1) : objectInfo.type;
+            if (!baseType.startsWith('%struct.')) {
+                throw new Error(`无法获取非结构体类型属性 '${memberName}' 的地址: ${objectInfo.type}`);
+            }
+            const className = baseType.substring('%struct.'.length);
+            const classEntry = this.classDefinitions.get(className);
+            if (!classEntry) {
+                throw new Error(`未定义类型 '${className}' 的类定义。`);
+            }
+            const memberEntry = classEntry.members.get(memberName);
+            if (!memberEntry) {
+                throw new Error(`类 '${className}' 中未定义成员 '${memberName}'。`);
+            }
+            const memberPtrVar = this.llvmHelper.getNewTempVar();
+            if (isPointer) { // Object itself is a pointer (e.g., class instance)
+                this.emit(`${memberPtrVar} = getelementptr inbounds ${classEntry.llvmType}, ${objectInfo.type} ${objectInfo.value}, i32 0, i32 ${memberEntry.index}`);
+            }
+            else { // Object is a struct value (passed by value)
+                // This case is tricky. If objectInfo.value is the struct value, we need its *address* first.
+                // For simplicity, let's assume getting address of properties is primarily for pointer-like objects.
+                throw new Error(`尚不支持获取值类型结构体属性 '${memberName}' 的地址。`);
+            }
+            const asInt = this.llvmHelper.getNewTempVar();
+            this.emit(`${asInt} = ptrtoint ${memberEntry.llvmType}* ${memberPtrVar} to i64`);
+            return { value: asInt, type: 'i64', ptr: memberPtrVar, ptrType: `${memberEntry.llvmType}*` };
+        }
+        throw new Error(`无法获取表达式 '${expr.expression.constructor.name}' 的地址。`);
+    }
+    visitDereferenceExpr(expr) {
+        const ptrValue = expr.expression.accept(this); // This should yield an IRValue where type is a pointer type (e.g., i32*)
+        let ptrType = ptrValue.type;
+        let ptrVar = ptrValue.value;
+        if (!ptrType.endsWith('*')) {
+            if (ptrType === 'i64' && ptrValue.ptr) {
+                ptrVar = ptrValue.ptr;
+                ptrType = ptrValue.ptrType || 'i8*';
+            }
+            else {
+                throw new Error(`解引用操作符 '*' 只能用于指针类型，但得到了 '${ptrValue.type}'。`);
+            }
+        }
+        const baseType = ptrType.slice(0, -1); // Remove '*' to get the base type
+        const resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = load ${baseType}, ${ptrType} ${ptrVar}, align ${this.llvmHelper.getAlign(baseType)}`);
+        return { value: resultVar, type: baseType, address: ptrVar };
+    }
+    visitLiteralExpr(expr) {
+        const context = this.llvmHelper.getContext();
+        if (typeof expr.value === 'number') {
+            if (Number.isInteger(expr.value)) {
+                const i64Type = LLVM.Int64TypeInContext(context);
+                return { value: LLVM.ConstInt(i64Type, BigInt(expr.value), 1), type: i64Type };
+            }
+            const f64Type = LLVM.DoubleTypeInContext(context);
+            return { value: LLVM.ConstReal(f64Type, expr.value), type: f64Type };
+        }
+        if (typeof expr.value === 'string') {
+            const entry = this.llvmHelper.createGlobalString(expr.value);
+            return { value: entry.stringStructGlobal, type: LLVM.PointerType(this.llvmHelper.getLLVMTypeByName(LangItems.string.structName), 0) };
+        }
+        if (typeof expr.value === 'boolean') {
+            const i1Type = LLVM.Int1TypeInContext(context);
+            return { value: LLVM.ConstInt(i1Type, expr.value ? 1n : 0n, 0), type: i1Type };
+        }
+        return { value: null, type: LLVM.VoidTypeInContext(context) };
+    }
+    visitIdentifierExpr(expr) {
+        const name = expr.name.lexeme;
+        const context = this.llvmHelper.getContext();
+        if (this.debug)
+            console.log("Looking up identifier:", name);
+        const entry = this.currentScope.find(name);
+        if (!entry) {
+            // Special handling for 'syscall' intrinsic placeholder
+            if (name === 'syscall') {
+                return { value: null, type: LLVM.Int64TypeInContext(context) };
+            }
+            throw new Error(`Undefined variable or function: ${name}`);
+        }
+        const typeKind = LLVM.GetTypeKind(entry.llvmType);
+        // If it's a function, return its pointer
+        if (typeKind === 9) { // LLVMFunctionTypeKind
+            return { value: entry.ptr, type: LLVM.PointerType(entry.llvmType, 0) };
+        }
+        // Load the value from the variable's pointer (alloca or global)
+        const loadedValue = LLVM.BuildLoad2(this.builder, entry.llvmType, entry.ptr, name);
+        return { value: loadedValue, type: entry.llvmType, address: entry.ptr };
+    }
+    visitBinaryExpr(expr) {
+        const left = expr.left.accept(this);
+        const right = expr.right.accept(this);
+        switch (expr.operator.type) {
+            case TokenType.PLUS:
+                // Built-in string concatenation
+                {
+                    const leftStr = this.ensureStringPointer(left);
+                    const rightStr = this.ensureStringPointer(right);
+                    if (leftStr && rightStr) {
+                        return this.concatStrings(leftStr, rightStr);
+                    }
+                }
+                // Numeric addition
+                return { value: LLVM.BuildAdd(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.MINUS:
+                return { value: LLVM.BuildSub(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.STAR:
+                return { value: LLVM.BuildMul(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.SLASH:
+                return { value: LLVM.BuildSDiv(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.PERCENT: // Added PERCENT for modulo
+                return { value: LLVM.BuildSRem(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.AMPERSAND: // Added AMPERSAND for bitwise AND
+                return { value: LLVM.BuildAnd(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.PIPE: // Added PIPE for bitwise OR
+                return { value: LLVM.BuildOr(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.CARET: // Added CARET for bitwise XOR
+                return { value: LLVM.BuildXor(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.LT_LT: // Added LT_LT for left shift
+                return { value: LLVM.BuildShl(this.builder, left.value, right.value, ""), type: left.type };
+            case TokenType.GT_GT: // Added GT_GT for right shift
+                return { value: LLVM.BuildAShr(this.builder, left.value, right.value, ""), type: left.type };
+            // Comparison operators
+            case TokenType.EQ_EQ:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntEQ, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            case TokenType.BANG_EQ:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntNE, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            case TokenType.GT:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntSGT, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            case TokenType.GT_EQ:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntSGE, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            case TokenType.LT:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntSLT, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            case TokenType.LT_EQ:
+                return { value: LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntSLE, left.value, right.value, ""), type: LLVM.Int1TypeInContext(this.llvmHelper.getContext()) };
+            default:
+                throw new Error(`Unsupported binary operator: ${expr.operator.lexeme}`);
+        }
+    }
+    visitUnaryExpr(expr) {
+        const right = expr.right.accept(this);
+        const context = this.llvmHelper.getContext();
+        switch (expr.operator.type) {
+            case TokenType.MINUS: // Negation
+                const zero = LLVM.ConstInt(right.type, 0, 0);
+                return { value: LLVM.BuildSub(this.builder, zero, right.value, ""), type: right.type };
+            case TokenType.BANG: // Logical not
+                const one = LLVM.ConstInt(LLVM.Int1TypeInContext(context), 1, 0);
+                return { value: LLVM.BuildXor(this.builder, right.value, one, ""), type: LLVM.Int1TypeInContext(context) };
+            default:
+                throw new Error(`Unsupported unary operator: ${expr.operator.lexeme}`);
+        }
+    }
+    visitGroupingExpr(expr) {
+        return expr.expression.accept(this);
+    }
+    visitCallExpr(expr) {
+        // Special case for `addrof` to get the address of a variable directly.
+        if (expr.callee instanceof IdentifierExpr && expr.callee.name.lexeme === 'addrof') {
+            if (expr.args.length !== 1 || !(expr.args[0] instanceof IdentifierExpr)) {
+                throw new Error("addrof() requires exactly one argument, which must be a variable name.");
+            }
+            const varName = expr.args[0].name.lexeme;
+            const entry = this.currentScope.find(varName);
+            if (!entry) {
+                throw new Error(`Undefined variable: ${varName}`);
+            }
+            // `addrof` now always returns the address of the stack variable.
+            const resultVar = this.llvmHelper.getNewTempVar();
+            this.emit(`${resultVar} = ptrtoint ${entry.llvmType}* ${entry.ptr} to i64`);
+            return { value: resultVar, type: 'i64' };
+        }
+        // Special case for array push: arr.push(x)
+        if (expr.callee instanceof GetExpr && expr.callee.name.lexeme === 'push') {
+            if (expr.args.length !== 1) {
+                throw new Error("array.push expects exactly one argument.");
+            }
+            const arrayInfo = expr.callee.object.accept(this);
+            const elementValue = expr.args[0].accept(this);
+            const arrayPtrInfo = this.ensureArrayPointer(arrayInfo);
+            const appendBuiltin = findPredefinedFunction('_builtin_array_append');
+            if (!appendBuiltin) {
+                throw new Error("Builtin _builtin_array_append not found.");
+            }
+            return appendBuiltin.handler(this, [
+                { value: arrayPtrInfo.ptr, type: `${arrayPtrInfo.structType}*` },
+                elementValue
+            ]);
+        }
+        // Handle predefined/builtin functions directly
+        if (expr.callee instanceof IdentifierExpr) {
+            const predefined = findPredefinedFunction(expr.callee.name.lexeme);
+            if (predefined) {
+                const evaluatedArgs = expr.args.map(a => a.accept(this));
+                return predefined.handler(this, evaluatedArgs);
+            }
+        }
+        let calleeInfo = expr.callee.accept(this);
+        const argValues = expr.args.map(arg => arg.accept(this));
+        // --- 闭包调用处理 ---
+        // 如果被调用者是一个闭包对象 (即 { func*, env* }* 类型),
+        // 我们需要解构它以获取真正的函数指针和环境指针。
+        if (calleeInfo.type.startsWith('{') && calleeInfo.type.endsWith('}*')) {
+            const closureObjPtr = calleeInfo.value;
+            const closureObjType = calleeInfo.type.slice(0, -1);
+            if (this.debug)
+                console.log(`Unwrap closure: objPtr=${closureObjPtr}, objType=${closureObjType}`);
+            // 1. 从闭包对象中加载函数指针 (位于字段 0)
+            const funcPtrFieldPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${funcPtrFieldPtr} = getelementptr inbounds ${closureObjType}, ${calleeInfo.type} ${closureObjPtr}, i32 0, i32 0`);
+            // 从结构体类型字符串中提取函数指针和环境指针类型
+            const fields = this.splitStructFields(closureObjType);
+            if (fields.length < 2) {
+                throw new Error(`无法从闭包对象类型中提取字段类型: ${closureObjType}`);
+            }
+            const loadedFuncPtrType = fields[0]; // Already ends with '*'
+            const loadedFuncPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedFuncPtr} = load ${loadedFuncPtrType}, ${loadedFuncPtrType}* ${funcPtrFieldPtr}, align 8`);
+            // 2. 从闭包对象中加载环境指针 (位于字段 1)
+            const envPtrFieldPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${envPtrFieldPtr} = getelementptr inbounds ${closureObjType}, ${calleeInfo.type} ${closureObjPtr}, i32 0, i32 1`);
+            const loadedEnvPtrType = fields[1];
+            const loadedEnvPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${loadedEnvPtr} = load ${loadedEnvPtrType}, ${loadedEnvPtrType}* ${envPtrFieldPtr}, align 8`);
+            // 3. 更新 calleeInfo 并将环境指针作为第一个参数
+            calleeInfo = { value: loadedFuncPtr, type: loadedFuncPtrType };
+            argValues.unshift({ value: loadedEnvPtr, type: loadedEnvPtrType });
+        }
+        // --- 结束闭包调用处理 ---
+        const funcRef = calleeInfo.value; // The callable reference (function symbol or pointer)
+        // Special-case syscall intrinsic
+        if (calleeInfo.type === 'internal_syscall' || calleeInfo.value === '__syscall6') {
+            // syscall(number[, arg1..arg6]) -> i64
+            // Delegates to the platform for actual syscall emission
+            const syscallNum = argValues[0];
+            if (!syscallNum) {
+                throw new Error("syscall intrinsic requires at least one argument for the syscall number.");
+            }
+            const argsForPlatform = argValues.slice(1);
+            return this.platform.emitSyscall(this, syscallNum, argsForPlatform);
+        }
+        // Inject implicit 'this' for method calls (if provided by GetExpr)
+        if (calleeInfo.classInstancePtr) {
+            argValues.unshift({
+                value: calleeInfo.classInstancePtr,
+                type: calleeInfo.classInstancePtrType || 'i8*'
+            });
+        }
+        if (this.debug)
+            console.log(`Call candidate: callee=${calleeInfo.value}, type=${calleeInfo.type}`);
+        const typeStr = calleeInfo.type.trim();
+        if (!typeStr.endsWith('*')) {
+            console.error(`Call target not a function pointer: callee=${calleeInfo.value}, type=${calleeInfo.type}`);
+            throw new Error(`Attempted to call a non-function type: ${calleeInfo.type} (callee: ${calleeInfo.value})`);
+        }
+        // Parse function type string like "ret (param1, param2)*" even when params are function pointers.
+        const withoutStar = typeStr.slice(0, -1).trim(); // drop trailing '*'
+        const lastParen = withoutStar.lastIndexOf(')');
+        let paramListStart = -1;
+        let scanDepth = 0;
+        for (let i = lastParen; i >= 0; i--) {
+            const ch = withoutStar[i];
+            if (ch === ')')
+                scanDepth++;
+            else if (ch === '(') {
+                scanDepth--;
+                if (scanDepth === 0) {
+                    paramListStart = i;
+                    break;
+                }
+            }
+        }
+        if (paramListStart < 0 || lastParen < paramListStart) {
+            throw new Error(`Attempted to call a non-function type: ${calleeInfo.type} (callee: ${calleeInfo.value})`);
+        }
+        const returnType = withoutStar.slice(0, paramListStart).trim();
+        const paramTypesRaw = withoutStar.slice(paramListStart + 1, lastParen);
+        // Split parameters while respecting nested parentheses in function-pointer params.
+        const paramTypes = [];
+        let current = '';
+        let depth = 0;
+        for (const ch of paramTypesRaw) {
+            if (ch === ',' && depth === 0) {
+                if (current.trim().length > 0)
+                    paramTypes.push(current.trim());
+                current = '';
+                continue;
+            }
+            if (ch === '(' || ch === '{' || ch === '[')
+                depth++;
+            if (ch === ')' || ch === '}' || ch === ']')
+                depth = Math.max(0, depth - 1);
+            current += ch;
+        }
+        if (current.trim().length > 0)
+            paramTypes.push(current.trim());
+        if (this.debug)
+            console.log(`Call: callee=${calleeInfo.value}, type=${calleeInfo.type}, ret=${returnType}, params=[${paramTypes.join(', ')}]`);
+        let callArgs = [];
+        // Handle SRET-style functions (void return with first param as struct pointer)
+        let sretPtrVar = null;
+        let sretParamType = null;
+        let effectiveParamTypes = paramTypes;
+        const firstParam = paramTypes[0];
+        const isSretFunc = (returnType === 'void' && firstParam && firstParam.startsWith('%struct.') && firstParam.endsWith('*'));
+        if (isSretFunc) {
+            sretParamType = firstParam;
+            const structType = firstParam.slice(0, -1);
+            sretPtrVar = this.llvmHelper.getNewTempVar();
+            this.emit(`${sretPtrVar} = alloca ${structType}, align ${this.llvmHelper.getAlign(structType)}`);
+            callArgs.push(`${firstParam} ${sretPtrVar}`);
+            effectiveParamTypes = paramTypes.slice(1);
+        }
+        argValues.forEach((arg, idx) => {
+            const expectedParam = effectiveParamTypes[idx]; // The expected LLVM type for this parameter
+            let argValue = arg.value;
+            let argType = arg.type;
+            // If a string value is expected but we have a non-string scalar, auto-convert using builtin toString().
+            if (expectedParam === LangItems.string.structName && argType !== LangItems.string.structName && argType !== `${LangItems.string.structName}*`) {
+                const toStringBuiltin = findPredefinedFunction('toString');
+                if (toStringBuiltin) {
+                    const converted = toStringBuiltin.handler(this, [arg]);
+                    argValue = converted.value;
+                    argType = converted.type;
+                }
+            }
+            // 如果参数数量不匹配，或者没有期望的参数类型，我们跳过隐式引用，但仍会尝试类型转换
+            if (!expectedParam) {
+                callArgs.push(`${argType} ${argValue}`); // If no expected type, pass as-is after conversions
+                return;
+            }
+            // Struct pointer -> struct value when the callee expects a value.
+            if (expectedParam.startsWith('%struct.') && !expectedParam.endsWith('*') && argType === `${expectedParam}*`) {
+                const loadedStruct = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedStruct} = load ${expectedParam}, ${expectedParam}* ${argValue}, align ${this.llvmHelper.getAlign(expectedParam)}`);
+                argValue = loadedStruct;
+                argType = expectedParam;
+            }
+            // --- PARAMETER PASSING SEMANTICS & IMPLICIT REFERENCING ---
+            // 规则1: 如果函数期望 T*，而传入的是 T，则自动获取地址。
+            if (expectedParam.endsWith('*') && !argType.endsWith('*')) {
+                const expectedBaseType = expectedParam.slice(0, -1); // 期望的基础类型
+                // 检查基础类型是否匹配 (例如，期望 i32*，传入 i32)
+                if (expectedBaseType === argType) {
+                    if (!arg.address) {
+                        // 如果参数是字面量或表达式结果，没有直接地址，
+                        // 则在栈上分配临时空间存储值，然后传递该临时空间的地址。
+                        const tempAlloca = this.llvmHelper.getNewTempVar();
+                        this.emit(`${tempAlloca} = alloca ${argType}, align ${this.llvmHelper.getAlign(argType)}`);
+                        this.emit(`store ${argType} ${argValue}, ${argType}* ${tempAlloca}, align ${this.llvmHelper.getAlign(argType)}`);
+                        argValue = tempAlloca; // 现在 argValue 是临时 alloca 的指针
+                    }
+                    else {
+                        // 如果参数有直接地址 (例如，它本身就是个变量)，则使用其地址。
+                        argValue = arg.address;
+                    }
+                    argType = expectedParam; // 现在参数类型是期望的指针类型
+                }
+            }
+            // --- END PARAMETER PASSING SEMANTICS & IMPLICIT REFERENCING ---
+            // --- 类型转换 (T to expectedParam) ---
+            if (expectedParam !== argType) {
+                // Struct pointer -> struct value (load)
+                if (expectedParam.startsWith('%struct.') && !expectedParam.endsWith('*') && argType === `${expectedParam}*`) {
+                    const loadedStruct = this.llvmHelper.getNewTempVar();
+                    this.emit(`${loadedStruct} = load ${expectedParam}, ${expectedParam}* ${argValue}, align ${this.llvmHelper.getAlign(expectedParam)}`);
+                    argValue = loadedStruct;
+                    argType = expectedParam;
+                }
+                else {
+                    const convertedArg = this.llvmHelper.getNewTempVar();
+                    const currentArgType = argType;
+                    const currentArgValue = argValue;
+                    const isCurrentInt = currentArgType.startsWith('i');
+                    const isExpectedInt = expectedParam.startsWith('i');
+                    const isCurrentFloat = currentArgType.startsWith('f');
+                    const isExpectedFloat = expectedParam.startsWith('f');
+                    const isCurrentPtr = currentArgType.endsWith('*');
+                    const isExpectedPtr = expectedParam.endsWith('*');
+                    if (isCurrentInt && isExpectedInt) {
+                        const currentBits = parseInt(currentArgType.slice(1), 10);
+                        const expectedBits = parseInt(expectedParam.slice(1), 10);
+                        if (expectedBits > currentBits) {
+                            this.emit(`${convertedArg} = sext ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        }
+                        else if (expectedBits < currentBits) {
+                            this.emit(`${convertedArg} = trunc ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        }
+                        else { // Same bit width, but possibly different sign handling (though LLVM handles iN types uniformly for bitcast)
+                            this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        }
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentFloat && isExpectedFloat) {
+                        const currentBits = parseInt(currentArgType.slice(1), 10);
+                        const expectedBits = parseInt(expectedParam.slice(1), 10);
+                        if (expectedBits > currentBits) { // e.g., f32 to f64
+                            this.emit(`${convertedArg} = fpext ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        }
+                        else if (expectedBits < currentBits) { // e.g., f64 to f32
+                            this.emit(`${convertedArg} = fptrunc ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        }
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentInt && isExpectedFloat) { // int to float
+                        this.emit(`${convertedArg} = sitofp ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentFloat && isExpectedInt) { // float to int
+                        this.emit(`${convertedArg} = fptosi ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentPtr && isExpectedPtr) { // pointer to pointer bitcast
+                        this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentInt && isExpectedPtr) { // int to pointer
+                        this.emit(`${convertedArg} = inttoptr ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (isCurrentPtr && isExpectedInt) { // pointer to int
+                        this.emit(`${convertedArg} = ptrtoint ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                        argValue = convertedArg;
+                        argType = expectedParam;
+                    }
+                    else if (currentArgType.startsWith('%struct.') && expectedParam.startsWith('%struct.')) {
+                        // Struct to struct conversion (e.g. from string literal constant to local string struct)
+                        // If the current arg is a pointer to struct, and expected is a struct VALUE, we need to load.
+                        // This scenario is mostly handled by implicit referencing.
+                        // If it's a direct struct value to struct value, a bitcast might be needed if types are just nominal.
+                        // For now, assume implicit referencing handles the common case.
+                        // If currentArgType is %struct.foo* and expectedParam is %struct.bar, implies a load then bitcast value or error.
+                        // For now, if types are literally different struct types, throw error unless specific conversion is defined.
+                        // Or implicitly bitcast if compatible by size. For now, we will rely on strict type matching unless explicit casts.
+                    }
+                    else {
+                        // Fallback for unhandled conversions
+                        // throw new Error(`无法转换类型从 ${currentArgType} 到 ${expectedParam}。`);
+                        // For robustness, allow bitcast as a last resort, assuming LLVM will validate.
+                        if (currentArgType !== expectedParam) { // Only if genuinely different
+                            this.emit(`${convertedArg} = bitcast ${currentArgType} ${currentArgValue} to ${expectedParam}`);
+                            argValue = convertedArg;
+                            argType = expectedParam;
+                        }
+                    }
+                }
+            }
+            // --- END 类型转换 ---
+            callArgs.push(`${argType} ${argValue}`);
+        });
+        const callInstr = `call ${returnType} ${funcRef}(${callArgs.join(', ')})`;
+        if (returnType === 'void') {
+            this.emit(callInstr);
+            if (sretPtrVar && sretParamType) {
+                return { value: sretPtrVar, type: `${sretParamType}` };
+            }
+            return { value: '', type: 'void' };
+        }
+        const resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = ${callInstr}`);
+        return { value: resultVar, type: returnType };
+    }
+    visitAssignExpr(expr) {
+        if (expr.target instanceof IdentifierExpr) {
+            const varName = expr.target.name.lexeme;
+            const captured = (this.currentFunction && this.currentFunction.capturedVariables)
+                ? this.currentFunction.capturedVariables.find(v => v.name === varName)
+                : null;
+            const entry = captured ? null : this.currentScope.find(varName);
+            if (!captured && !entry) {
+                throw new Error(`Assignment to undeclared variable: ${varName}`);
+            }
+            const targetType = captured ? captured.llvmType : entry.llvmType;
+            if (expr.value instanceof ArrayLiteralExpr && targetType.startsWith(LangItems.array.structPrefix)) {
+                this.arrayLiteralExpectedStructType = targetType;
+            }
+            const value = expr.value.accept(this); // Evaluate the right-hand side after setting expectations
+            this.arrayLiteralExpectedStructType = null;
+            // Handle captured variable assignment inside closures
+            if (captured) {
+                const envEntry = this.currentScope.find('__env_ptr');
+                if (!envEntry)
+                    throw new Error("内部错误：在作用域中未找到闭包环境指针 '__env_ptr'。");
+                const envPtr = envEntry.ptr;
+                const envStructType = envEntry.llvmType.slice(0, -1);
+                const capturedIndex = this.currentFunction.capturedVariables.findIndex(v => v.name === varName);
+                const envFieldPtr = this.llvmHelper.getNewTempVar();
+                this.emit(`${envFieldPtr} = getelementptr inbounds ${envStructType}, ${envEntry.llvmType} ${envPtr}, i32 0, i32 ${capturedIndex}`);
+                const capturedVarPtr = this.llvmHelper.getNewTempVar();
+                const capturedVarPtrType = `${captured.llvmType}*`;
+                this.emit(`${capturedVarPtr} = load ${capturedVarPtrType}, ${capturedVarPtrType}* ${envFieldPtr}, align 8`);
+                const coerced = value.type === captured.llvmType ? value : this.coerceValue(value, captured.llvmType);
+                this.emit(`store ${captured.llvmType} ${coerced.value}, ${capturedVarPtrType} ${capturedVarPtr}, align ${this.llvmHelper.getAlign(captured.llvmType)}`);
+                return coerced;
+            }
+            let toStore = value;
+            if (value.type === `${entry.llvmType}*` && entry.llvmType.startsWith('%struct.') && !entry.llvmType.endsWith('*')) {
+                const loadedStruct = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedStruct} = load ${entry.llvmType}, ${entry.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+                toStore = { value: loadedStruct, type: entry.llvmType };
+            }
+            else if (value.type !== entry.llvmType) {
+                toStore = this.coerceValue(value, entry.llvmType);
+            }
+            this.emit(`store ${entry.llvmType} ${toStore.value}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+            return toStore;
+        }
+        else if (expr.target instanceof GetExpr) { // Handle object.property = value
+            const value = expr.value.accept(this); // Evaluate the right-hand side first
+            const objectInfo = expr.target.object.accept(this); // Evaluate object (e.g., 'this')
+            const memberName = expr.target.name.lexeme; // Get property name
+            // Get class definition for the object
+            const objectTypeMatch = objectInfo.type.match(/%struct\.([a-zA-Z0-9_]+)\*/);
+            if (!objectTypeMatch || !objectTypeMatch[1]) {
+                throw new Error(`Cannot assign to property '${memberName}' of non-struct type: ${objectInfo.type}`);
+            }
+            const className = objectTypeMatch[1];
+            const classEntry = this.classDefinitions.get(className);
+            if (!classEntry) {
+                throw new Error(`Undefined class definition for type: ${objectInfo.type}`);
+            }
+            const memberEntry = classEntry.members.get(memberName);
+            if (!memberEntry) {
+                throw new Error(`Undefined member '${memberName}' in class '${className}' for assignment.`);
+            }
+            // Get pointer to the member
+            const memberPtrVar = this.llvmHelper.getNewTempVar();
+            this.emit(`${memberPtrVar} = getelementptr inbounds ${classEntry.llvmType}, ${objectInfo.type} ${objectInfo.value}, i32 0, i32 ${memberEntry.index}`);
+            // Store the value into the member
+            const coerced = (value.type === `${memberEntry.llvmType}*` && memberEntry.llvmType.startsWith('%struct.'))
+                ? (() => {
+                    const loaded = this.llvmHelper.getNewTempVar();
+                    this.emit(`${loaded} = load ${memberEntry.llvmType}, ${memberEntry.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
+                    return { value: loaded, type: memberEntry.llvmType };
+                })()
+                : (value.type === memberEntry.llvmType ? value : this.coerceValue(value, memberEntry.llvmType));
+            this.emit(`store ${memberEntry.llvmType} ${coerced.value}, ${memberEntry.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
+            return coerced;
+        }
+        else if (expr.target instanceof IndexExpr) { // Handle array[index] = value
+            const value = expr.value.accept(this);
+            const arrayInfo = expr.target.array.accept(this);
+            const indexInfo = expr.target.index.accept(this);
+            const arrayPtrInfo = this.ensureArrayPointer(arrayInfo);
+            const arrayPtrValue = { value: arrayPtrInfo.ptr, type: `${arrayPtrInfo.structType}*` };
+            const indexValue = indexInfo.type === 'i64' ? indexInfo : this.coerceValue(indexInfo, 'i64');
+            const setBuiltin = findPredefinedFunction('_builtin_array_set');
+            if (!setBuiltin) {
+                throw new Error("Builtin _builtin_array_set not found.");
+            }
+            setBuiltin.handler(this, [arrayPtrValue, indexValue, value]);
+            return value;
+        }
+        else if (expr.target instanceof DereferenceExpr) { // Handle *ptr = value
+            const value = expr.value.accept(this);
+            const targetPtr = expr.target.expression.accept(this); // Evaluate `ptr` in `*ptr`
+            if (!targetPtr.type.endsWith('*')) {
+                throw new Error(`无法赋值给非指针类型 '${targetPtr.type}' 的解引用结果。`);
+            }
+            // The base type of the pointer is the type of the value being stored.
+            const baseType = targetPtr.type.slice(0, -1);
+            const coerced = value.type === baseType ? value : this.coerceValue(value, baseType);
+            this.emit(`store ${baseType} ${coerced.value}, ${targetPtr.type} ${targetPtr.value}, align ${this.llvmHelper.getAlign(baseType)}`);
+            return coerced;
+        }
+        else {
+            throw new Error(`Invalid assignment target: ${expr.target.constructor.name}`);
+        }
+    }
+    // --- StmtVisitor methods ---
+    visitExpressionStmt(stmt) {
+        stmt.expression.accept(this); // Consume result
+    }
+    visitLetStmt(stmt) {
+        // Check if this is a global or local variable
+        if (this.currentScope === this.globalScope) {
+            this.visitGlobalLetStmt(stmt);
+        }
+        else {
+            this.visitLocalLetStmt(stmt);
+        }
+    }
+    visitConstStmt(stmt) {
+        const varName = stmt.name.lexeme;
+        const mangledName = `@${varName}`;
+        const llvmType = this.llvmHelper.getLLVMType(stmt.type);
+        const linkage = stmt.isExported ? '' : 'internal ';
+        let initialValue = 'zeroinitializer'; // Default for global const
+        if (stmt.initializer) {
+            if (stmt.initializer instanceof LiteralExpr) {
+                const literal = this.visitLiteralExpr(stmt.initializer);
+                initialValue = literal.value;
+            }
+            else {
+                throw new Error("Global constant initializers must be constant literals.");
+            }
+        }
+        this.globalScope.define(varName, {
+            llvmType: llvmType,
+            ptr: mangledName,
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
+        });
+    }
+    visitGlobalLetStmt(stmt) {
+        const varName = stmt.name.lexeme;
+        const mangledName = `@${varName}`;
+        const llvmType = this.llvmHelper.getLLVMType(stmt.type);
+        const linkage = stmt.isExported ? '' : 'internal ';
+        let initialValue = '0';
+        if (stmt.initializer) {
+            if (stmt.initializer instanceof LiteralExpr) {
+                const literal = this.visitLiteralExpr(stmt.initializer);
+                initialValue = literal.value;
+            }
+            else {
+                throw new Error("Global variable initializers must be constant literals.");
+            }
+        }
+        this.emit(`${mangledName} = ${linkage}global ${llvmType} ${initialValue}, align ${this.llvmHelper.getAlign(llvmType)}`, false);
+        this.globalScope.define(varName, {
+            llvmType: llvmType,
+            ptr: mangledName,
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
+        });
+    }
+    visitLocalLetStmt(stmt) {
+        const varName = stmt.name.lexeme;
+        let llvmType;
+        let initValue = null;
+        if (stmt.type) { // 显式类型注解
+            llvmType = this.llvmHelper.getLLVMType(stmt.type);
+            // If it's an array type, ensure its definition is emitted.
+            if (stmt.type instanceof ArrayTypeAnnotation) { // Check for ArrayTypeAnnotation instance directly
+                this.llvmHelper.ensureArrayStructDefinition(this.llvmHelper.getLLVMType(stmt.type.elementType));
+            }
+            if (stmt.initializer) {
+                // Provide expected struct type to object literal lowering
+                this.objectLiteralExpectedStructType = (llvmType.startsWith('%struct.') && !llvmType.endsWith('*')) ? llvmType : null;
+                this.arrayLiteralExpectedStructType = (llvmType.startsWith(LangItems.array.structPrefix)) ? llvmType : null;
+                initValue = stmt.initializer.accept(this);
+                this.objectLiteralExpectedStructType = null;
+                this.arrayLiteralExpectedStructType = null;
+            }
+        }
+        else {
+            if (stmt.initializer) {
+                initValue = stmt.initializer.accept(this);
+            }
+            if (initValue) { // 从初始化器推断类型
+                // 字符串字面量推断为值类型 string（结构体）
+                if (initValue.type === `${LangItems.string.structName}*` && !initValue.type.endsWith(')*')) { // 排除函数指针
+                    llvmType = LangItems.string.structName;
+                }
+                else if (initValue.type.startsWith(LangItems.array.structPrefix)) { // NEW: Array type inference
+                    llvmType = initValue.type;
+                }
+                else if (initValue.ptrType) {
+                    // 地址推断为指针类型
+                    llvmType = initValue.ptrType;
+                }
+                else {
+                    llvmType = initValue.type;
+                }
+            }
+            else {
+                throw new Error(`变量 '${varName}' 声明时必须指定类型或提供初始化器。`);
+            }
+        }
+        if (this.debug)
+            console.log(`Let ${varName} inferred LLVM type: ${llvmType}, initValue.type: ${initValue ? initValue.type : 'null'}`);
+        const varPtr = `%${varName}`;
+        this.emit(`${varPtr} = alloca ${llvmType}, align ${this.llvmHelper.getAlign(llvmType)}`);
+        this.currentScope.define(varName, {
+            llvmType: llvmType,
+            ptr: varPtr,
+            isPointer: llvmType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
+        });
+        if (initValue) {
+            // 如果初始化器是结构体指针 (%struct.String*) 且变量是结构体值 (%struct.String)
+            if (initValue.type === `${llvmType}*` && !llvmType.endsWith('*') && llvmType.startsWith('%struct.')) {
+                const loadedStruct = this.llvmHelper.getNewTempVar();
+                this.emit(`${loadedStruct} = load ${llvmType}, ${llvmType}* ${initValue.value}, align ${this.llvmHelper.getAlign(llvmType)}`);
+                this.emit(`store ${llvmType} ${loadedStruct}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+            }
+            else if (llvmType.startsWith(LangItems.array.structPrefix) && initValue.type.startsWith(LangItems.array.structPrefix)) {
+                // Copy the array struct value directly
+                const coerced = this.coerceValue(initValue, llvmType);
+                this.emit(`store ${llvmType} ${coerced.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+            }
+            else {
+                const coerced = this.coerceValue(initValue, llvmType);
+                this.emit(`store ${llvmType} ${coerced.value}, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+            }
+        }
+        else if (llvmType.startsWith(LangItems.array.structPrefix)) { // NEW: Default initialize empty array
+            // Default initialize array to { null, 0, 0 }
+            const elementTypeLlvmType = this.llvmHelper.getLLVMType(stmt.type.elementType);
+            const elementPtrType = this.llvmHelper.getPointerType(elementTypeLlvmType);
+            const nullPtr = 'null';
+            const zeroI64 = '0';
+            this.emit(`store ${llvmType} { ${elementPtrType} ${nullPtr}, i64 ${zeroI64}, i64 ${zeroI64} }, ${llvmType}* ${varPtr}, align ${this.llvmHelper.getAlign(llvmType)}`);
+        }
+    }
+    visitBlockStmt(stmt) {
+        this.enterScope();
+        stmt.statements.forEach(s => s.accept(this));
+        this.exitScope();
+    }
+    visitIfStmt(stmt) {
+        const condition = stmt.condition.accept(this);
+        if (condition.type !== 'i1') {
+            throw new Error('If condition must be a boolean expression.');
+        }
+        const thenLabel = this.getNewLabel('if.then');
+        const elseLabel = this.getNewLabel('if.else');
+        const endLabel = this.getNewLabel('if.end');
+        const finalDest = stmt.elseBranch ? elseLabel : endLabel;
+        this.emit(`br i1 ${condition.value}, label %${thenLabel}, label %${finalDest}`);
+        this.emit(`${thenLabel}:`, false);
+        this.indentLevel++;
+        stmt.thenBranch.accept(this);
+        this.emit(`br label %${endLabel}`);
+        this.indentLevel--;
+        if (stmt.elseBranch) {
+            this.emit(`${elseLabel}:`, false);
+            this.indentLevel++;
+            stmt.elseBranch.accept(this);
+            this.emit(`br label %${endLabel}`);
+            this.indentLevel--;
+        }
+        this.emit(`${endLabel}:`, false);
+    }
+    visitWhileStmt(stmt) {
+        const headerLabel = this.getNewLabel('while.header');
+        const bodyLabel = this.getNewLabel('while.body');
+        const endLabel = this.getNewLabel('while.end');
+        this.emit(`br label %${headerLabel}`);
+        this.emit(`${headerLabel}:`, false);
+        this.indentLevel++;
+        const condition = stmt.condition.accept(this);
+        if (condition.type !== 'i1') {
+            throw new Error('While condition must be a boolean expression.');
+        }
+        this.emit(`br i1 ${condition.value}, label %${bodyLabel}, label %${endLabel}`);
+        this.indentLevel--;
+        this.emit(`${bodyLabel}:`, false);
+        this.indentLevel++;
+        stmt.body.accept(this);
+        this.emit(`br label %${headerLabel}`);
+        this.indentLevel--;
+        this.emit(`${endLabel}:`, false);
+    }
+    visitReturnStmt(stmt) {
+        if (!this.currentFunction) {
+            throw new Error("Return statement outside of a function.");
+        }
+        const funcReturnType = this.llvmHelper.getLLVMType(this.currentFunction.returnType);
+        if (stmt.value) {
+            const retVal = stmt.value.accept(this);
+            if (this.sretPointer) {
+                // SRET convention: copy the struct pointed to by retVal.value into the sret pointer
+                // retVal.value is expected to be a pointer to the struct to be returned (e.g., %struct.string*)
+                const structSize = 16; // Hardcoding for %struct.string size (8 bytes for ptr, 8 for len)
+                const sizeOfStructI64 = `${structSize}`;
+                // Bitcast both pointers to i8* for memcpy
+                const destPtr = this.sretPointer;
+                const srcPtr = retVal.value;
+                const destI8Ptr = this.llvmHelper.getNewTempVar();
+                const srcI8Ptr = this.llvmHelper.getNewTempVar();
+                // 确定目标指针的LLVM类型，这里假设sretPointer已经是ptr类型
+                const sretPtrLlvmType = `ptr`; // 假设sretPointer已经是ptr类型
+                this.emit(`${destI8Ptr} = bitcast ${sretPtrLlvmType} ${destPtr} to i8*`);
+                this.emit(`${srcI8Ptr} = bitcast ${retVal.type} ${srcPtr} to i8*`);
+                const call = this.builtins.createMemcpy({ value: destI8Ptr, type: 'i8*' }, { value: srcI8Ptr, type: 'i8*' }, { value: sizeOfStructI64, type: 'i64' });
+                this.emit(call);
+                this.emit(`ret void`);
+            }
+            else {
+                // 如果返回值类型与函数签名不一致，进行必要的转换
+                let retValType = retVal.type;
+                let retValValue = retVal.value;
+                if (funcReturnType !== retValType) {
+                    const conv = this.llvmHelper.getNewTempVar();
+                    const isRetInt = funcReturnType.startsWith('i') && !funcReturnType.endsWith('*');
+                    const isValInt = retValType.startsWith('i') && !retValType.endsWith('*');
+                    const isRetPtr = funcReturnType.endsWith('*');
+                    const isValPtr = retValType.endsWith('*');
+                    if (isRetInt && isValInt) {
+                        const retBits = parseInt(funcReturnType.slice(1), 10);
+                        const valBits = parseInt(retValType.slice(1), 10);
+                        if (valBits < retBits) {
+                            this.emit(`${conv} = sext ${retValType} ${retValValue} to ${funcReturnType}`);
+                        }
+                        else if (valBits > retBits) {
+                            this.emit(`${conv} = trunc ${retValType} ${retValValue} to ${funcReturnType}`);
+                        }
+                        else {
+                            this.emit(`${conv} = bitcast ${retValType} ${retValValue} to ${funcReturnType}`);
+                        }
+                    }
+                    else if (isRetPtr && isValPtr) {
+                        this.emit(`${conv} = bitcast ${retValType} ${retValValue} to ${funcReturnType}`);
+                    }
+                    else if (isRetPtr && isValInt) {
+                        this.emit(`${conv} = inttoptr ${retValType} ${retValValue} to ${funcReturnType}`);
+                    }
+                    else if (isRetInt && isValPtr) {
+                        this.emit(`${conv} = ptrtoint ${retValType} ${retValValue} to ${funcReturnType}`);
+                    }
+                    else {
+                        this.emit(`${conv} = bitcast ${retValType} ${retValValue} to ${funcReturnType}`);
+                    }
+                    retValType = funcReturnType;
+                    retValValue = conv;
+                }
+                this.emit(`ret ${retValType} ${retValValue}`);
+            }
+        }
+        else {
+            this.emit(`ret void`);
+        }
+    }
+    visitFunctionDeclaration(decl) {
+        const key = this.getFunctionKey(decl);
+        if (!this.declaredSymbols.has(key)) {
+            this.declareFunctionSymbol(decl);
+            this.declaredSymbols.add(key);
+        }
+        if (!this.generatedFunctions.has(key)) {
+            this.emitFunctionDefinition(decl);
+            this.generatedFunctions.add(key);
+        }
+    }
+    declareFunctionSymbol(decl) {
+        const originalFuncName = decl.name.lexeme;
+        const context = this.llvmHelper.getContext();
+        let llvmReturnType = this.llvmHelper.getLLVMType(decl.returnType);
+        const paramTypes = decl.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+        const funcType = LLVM.FunctionType(llvmReturnType, paramTypes, paramTypes.length, 0);
+        const func = LLVM.AddFunction(this.module, originalFuncName, funcType);
+        this.globalScope.define(originalFuncName, {
+            llvmType: funcType,
+            ptr: func,
+            isPointer: true,
+            definedInScopeDepth: this.globalScope.depth
+        });
+    }
+    emitFunctionDefinition(decl) {
+        this.currentFunction = decl;
+        const originalFuncName = decl.name.lexeme;
+        const context = this.llvmHelper.getContext();
+        const entry = this.globalScope.find(originalFuncName);
+        const func = entry.ptr;
+        const entryBlock = LLVM.AppendBasicBlockInContext(context, func, "entry");
+        LLVM.PositionBuilderAtEnd(this.builder, entryBlock);
+        this.enterScope();
+        // Bind parameters
+        decl.parameters.forEach((p, i) => {
+            const paramVal = LLVM.GetParam(func, i);
+            const paramType = this.llvmHelper.getLLVMType(p.type);
+            const alloca = LLVM.BuildAlloca(this.builder, paramType, p.name.lexeme);
+            LLVM.BuildStore(this.builder, paramVal, alloca);
+            this.currentScope.define(p.name.lexeme, {
+                llvmType: paramType,
+                ptr: alloca,
+                isPointer: LLVM.GetTypeKind(paramType) === 12,
+                definedInScopeDepth: this.currentScope.depth
+            });
+        });
+        decl.body.statements.forEach(stmt => stmt.accept(this));
+        // Ensure every function has a return (basic fallback for void)
+        if (LLVM.GetTypeKind(this.llvmHelper.getLLVMType(decl.returnType)) === 0) { // LLVMVoidTypeKind
+            LLVM.BuildRetVoid(this.builder);
+        }
+        this.exitScope();
+    }
+    paramsString = signatureParamsList.join(', ');
+}
+this.emit(`define ${linkage}${llvmReturnType} ${mangledName}(${paramsString}) {`, false);
+this.indentLevel++;
+this.emit('entry:', false);
+this.enterScope();
+if (isSretReturn && sretArgName) {
+    this.currentScope.define(sretArgName, {
+        llvmType: `${this.llvmHelper.getLLVMType(decl.returnType)}*`,
+        ptr: sretArgName,
+        isPointer: true,
+        definedInScopeDepth: this.currentScope.depth
+    });
+}
+if (hasImplicitThis) {
+    const thisEntry = this.currentScope.find("this"); // From outer class scope
+    if (thisEntry) {
+        const thisPtr = `%this.ptr`;
+        const thisLlvmType = thisEntry.llvmType; // This will be %struct.MyClass*
+        this.emit(`${thisPtr} = alloca ${thisLlvmType}, align ${this.llvmHelper.getAlign(thisLlvmType)}`);
+        this.emit(`store ${thisLlvmType} %this, ${thisLlvmType}* ${thisPtr}, align ${this.llvmHelper.getAlign(thisLlvmType)}`);
+        this.currentScope.define("this", {
+            llvmType: thisLlvmType,
+            ptr: thisPtr,
+            isPointer: true,
+            definedInScopeDepth: this.currentScope.depth
+        });
+    }
+}
+decl.parameters.forEach(p => {
+    let paramType = this.llvmHelper.getLLVMType(p.type);
+    if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+        paramType = `${paramType}*`;
+    }
+    const paramName = p.name.lexeme;
+    const paramPtr = `%p.${paramName}`;
+    const incomingArgName = `%${paramName}`;
+    this.emit(`${paramPtr} = alloca ${paramType}, align ${this.llvmHelper.getAlign(paramType)}`);
+    this.emit(`store ${paramType} ${incomingArgName}, ${paramType}* ${paramPtr}, align ${this.llvmHelper.getAlign(paramType)}`);
+    this.currentScope.define(paramName, {
+        llvmType: paramType,
+        ptr: paramPtr,
+        isPointer: paramType.endsWith('*'),
+        definedInScopeDepth: this.currentScope.depth
+    });
+});
+decl.body.accept(this);
+const lastLine = this.builder[this.builder.length - 1];
+if (lastLine !== undefined && !lastLine.trim().startsWith('ret ') && !lastLine.trim().startsWith('br ')) {
+    if (llvmReturnType === 'void') {
+        this.emit(`ret void`);
+    }
+    else {
+        this.emit(`unreachable`);
+    }
+}
+this.exitScope();
+this.indentLevel--;
+this.emit('}', false);
+this.emit('', false);
+this.currentFunction = null;
+this.sretPointer = null;
+visitClassDeclaration(stmt, ClassDeclaration);
+void {
+    const: className = stmt.name.lexeme,
+    const: context = this.llvmHelper.getContext(),
+    // 1. Create or get the named struct type
+    const: structType = this.llvmHelper.getLLVMTypeByName(className),
+    const: membersMap, new: Map(),
+    const: methodsMap, new: Map(),
+    const: staticMethodsMap, new: Map(),
+    // 2. Collect field types and build members map
+    const: fieldTypes, LLVMTypeRef, []:  = stmt.properties.map((p, index) => {
+        const memberType = this.llvmHelper.getLLVMType(p.type);
+        membersMap.set(p.name.lexeme, { llvmType: memberType, index: index });
+        return memberType;
+    }),
+    // 3. Define the struct body
+    LLVM, : .StructSetBody(structType, fieldTypes, fieldTypes.length, 0),
+    // 4. Collect methods
+    stmt, : .methods.forEach(m => {
+        if (m.isStatic) {
+            staticMethodsMap.set(m.name.lexeme, m);
+        }
+        else {
+            methodsMap.set(m.name.lexeme, m);
+        }
+    }),
+    // 5. Store class definition
+    this: .classDefinitions.set(className, {
+        llvmType: structType,
+        members: membersMap,
+        methods: methodsMap,
+        staticMethods: staticMethodsMap
+    }),
+    : .pass === 'definition'
+};
+{
+    stmt.methods.forEach(method => {
+        const savedScope = this.currentScope;
+        // Create a scope that contains 'this' for instance methods
+        const methodScope = new Scope(this.globalScope);
+        if (!method.isStatic) {
+            methodScope.define("this", {
+                llvmType: LLVM.PointerType(structType, 0),
+                ptr: null, // Will be set during function emission from parameters
+                isPointer: true,
+                definedInScopeDepth: methodScope.depth
+            });
+        }
+        this.currentScope = methodScope;
+        this.visitFunctionDeclaration(method);
+        this.currentScope = savedScope;
+    });
+}
+visitStructDeclaration(decl, StructDeclaration);
+void {
+    const: structName = decl.name.lexeme,
+    const: context = this.llvmHelper.getContext(),
+    const: structType = this.llvmHelper.getLLVMTypeByName(structName),
+    const: membersMap, new: Map(),
+    const: fieldTypes, LLVMTypeRef, []:  = decl.properties.map((p, index) => {
+        const memberType = this.llvmHelper.getLLVMType(p.type);
+        membersMap.set(p.name.lexeme, { llvmType: memberType, index: index });
+        return memberType;
+    }),
+    LLVM, : .StructSetBody(structType, fieldTypes, fieldTypes.length, 0),
+    this: .classDefinitions.set(structName, {
+        llvmType: structType,
+        members: membersMap,
+        methods: new Map(),
+        staticMethods: new Map()
+    })
+};
+// --- Unimplemented methods (with correct signatures) ---
+visitGetExpr(expr, GetExpr);
+IRValue;
+{
+    const objectInfo = expr.object.accept(this);
+    const memberName = expr.name.lexeme;
+    // Module object access
+    const moduleInfo = (() => {
+        for (const info of this.moduleObjects.values()) {
+            if (objectInfo.type === `${info.structName}*`)
+                return info;
+            if (objectInfo.ptr && info.globalName === objectInfo.ptr)
+                return info;
+        }
+        return null;
+    })();
+    if (moduleInfo) {
+        const member = moduleInfo.members.get(memberName);
+        if (!member) {
+            throw new Error(`Undefined member '${memberName}' in module object.`);
+        }
+        const memberPtrVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${memberPtrVar} = getelementptr inbounds ${moduleInfo.structName}, ${moduleInfo.structName}* ${objectInfo.value}, i32 0, i32 ${member.index}`);
+        const loaded = this.llvmHelper.getNewTempVar();
+        this.emit(`${loaded} = load ${member.llvmType}, ${member.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
+        return { value: loaded, type: member.llvmType };
+    }
+    // NEW: Handle array.len and array.cap access
+    if (objectInfo.type.startsWith(LangItems.array.structPrefix)) {
+        const arrayStructType = objectInfo.type;
+        const arrayPtr = objectInfo.address || objectInfo.value; // Get the pointer to the array struct
+        if (!arrayPtr) {
+            throw new Error(`Cannot get member '${memberName}' of a non-addressable array value.`);
+        }
+        let memberIndex;
+        let memberLlvmType;
+        switch (memberName) {
+            case 'len':
+                memberIndex = LangItems.array.members.len.index;
+                memberLlvmType = LangItems.array.members.len.type;
+                break;
+            case 'cap':
+                memberIndex = LangItems.array.members.cap.index;
+                memberLlvmType = LangItems.array.members.cap.type;
+                break;
+            case 'ptr': // Allow direct access to underlying pointer for C compatibility
+                memberIndex = LangItems.array.members.ptr.index;
+                memberLlvmType = LangItems.array.members.ptr.type;
+                break;
+            default:
+                throw new Error(`Undefined member '${memberName}' in array type '${arrayStructType}'.`);
+        }
+        const memberPtrVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${memberPtrVar} = getelementptr inbounds ${arrayStructType}, ${arrayStructType}* ${arrayPtr}, i32 0, i32 ${memberIndex}`);
+        const loadedValue = this.llvmHelper.getNewTempVar();
+        this.emit(`${loadedValue} = load ${memberLlvmType}, ${memberLlvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberLlvmType)}`);
+        return { value: loadedValue, type: memberLlvmType };
+    }
+    // Lang Item: string.length will now be handled as a regular method/property access
+    // This assumes 'string' has a 'length' method/property defined in std.yu and imported.
+    // --- General struct member access ---
+    const isPointer = objectInfo.type.endsWith('*');
+    const baseType = isPointer ? objectInfo.type.slice(0, -1) : objectInfo.type;
+    if (!baseType.startsWith('%struct.')) {
+        throw new Error(`Cannot get property '${memberName}' of non-struct type: ${objectInfo.type}`);
+    }
+    const className = baseType.substring('%struct.'.length);
+    const classEntry = this.classDefinitions.get(className);
+    if (!classEntry) {
+        throw new Error(`Undefined class definition for type: ${objectInfo.type}`);
+    }
+    // Check for methods
+    const methodEntry = classEntry.methods.get(memberName);
+    if (methodEntry) {
+        const returnType = this.llvmHelper.getLLVMType(methodEntry.returnType);
+        const paramsList = methodEntry.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+        const instancePtrType = `${classEntry.llvmType}*`;
+        let funcType;
+        if (returnType.startsWith('%struct.') && !returnType.endsWith('*')) {
+            funcType = `void (${returnType}*, ${instancePtrType}${paramsList.length ? ', ' + paramsList.join(', ') : ''})*`;
+        }
+        else {
+            funcType = `${returnType} (${instancePtrType}${paramsList.length ? ', ' + paramsList.join(', ') : ''})*`;
+        }
+        const mangledName = `_cls_${className}_${methodEntry.name.lexeme}`;
+        return { value: `@${mangledName}`, type: funcType, classInstancePtr: objectInfo.value, classInstancePtrType: objectInfo.type };
+    }
+    // Check for properties
+    const memberEntry = classEntry.members.get(memberName);
+    if (!memberEntry) {
+        throw new Error(`Undefined member '${memberName}' in class '${className}'`);
+    }
+    let resultVar;
+    if (isPointer) {
+        const memberPtrVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${memberPtrVar} = getelementptr inbounds ${classEntry.llvmType}, ${objectInfo.type} ${objectInfo.value}, i32 0, i32 ${memberEntry.index}`);
+        resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = load ${memberEntry.llvmType}, ${memberEntry.llvmType}* ${memberPtrVar}, align ${this.llvmHelper.getAlign(memberEntry.llvmType)}`);
+        return { value: resultVar, type: memberEntry.llvmType, address: memberPtrVar };
+    }
+    else {
+        resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = extractvalue ${objectInfo.type} ${objectInfo.value}, ${memberEntry.index}`);
+    }
+    return { value: resultVar, type: memberEntry.llvmType };
+}
+visitIndexExpr(expr, IndexExpr);
+IRValue;
+{
+    const arrayInfo = expr.array.accept(this);
+    const indexInfo = expr.index.accept(this);
+    const context = this.llvmHelper.getContext();
+    // 1. Get pointer to the array struct
+    const arrayPtr = arrayInfo.address || arrayInfo.value;
+    const arrayStructType = arrayInfo.type;
+    // 2. Load the data pointer (T*) from field index 0
+    const dataFieldPtr = LLVM.BuildStructGEP2(this.builder, arrayStructType, arrayPtr, 0, "data_field");
+    const dataPtrType = LLVM.GetElementType(LLVM.TypeOf(dataFieldPtr));
+    const dataPtr = LLVM.BuildLoad2(this.builder, dataPtrType, dataFieldPtr, "data_ptr");
+    const elementType = LLVM.GetElementType(dataPtrType);
+    // 3. Compute element address: GEP data_ptr, index
+    const indexValue = this.ensureI64(indexInfo);
+    const elementPtr = LLVM.BuildInBoundsGEP2(this.builder, elementType, dataPtr, [indexValue], 1, "element_ptr");
+    // 4. Load value
+    const loadedValue = LLVM.BuildLoad2(this.builder, elementType, elementPtr, "index_val");
+    return { value: loadedValue, type: elementType, address: elementPtr };
+}
+visitNewExpr(expr, NewExpr);
+IRValue;
+{
+    // Determine class name from callee (Identifier or GetExpr with module prefix)
+    let className = null;
+    if (expr.callee instanceof IdentifierExpr) {
+        className = expr.callee.name.lexeme;
+    }
+    else if (expr.callee instanceof GetExpr) {
+        className = expr.callee.name.lexeme;
+    }
+    if (!className) {
+        throw new Error("new expression requires a class identifier");
+    }
+    const classEntry = this.classDefinitions.get(className);
+    if (!classEntry) {
+        throw new Error(`Undefined class for new: ${className}`);
+    }
+    // Compute size via GEP null,1 trick
+    const sizePtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${sizePtr} = getelementptr inbounds ${classEntry.llvmType}, ${classEntry.llvmType}* null, i32 1`);
+    const sizeInt = this.llvmHelper.getNewTempVar();
+    this.emit(`${sizeInt} = ptrtoint ${classEntry.llvmType}* ${sizePtr} to i64`);
+    // Heap allocate (same as _builtin_alloc)
+    this.ensureHeapGlobals();
+    const initFlag = this.llvmHelper.getNewTempVar();
+    this.emit(`${initFlag} = load i1, i1* @__heap_initialized, align 1`);
+    const initEnd = this.getNewLabel('heap.init.end.new');
+    const initDo = this.getNewLabel('heap.init.do.new');
+    this.emit(`br i1 ${initFlag}, label %${initEnd}, label %${initDo}`);
+    this.emit(`${initDo}:`, false);
+    this.indentLevel++;
+    const curBrk = this.llvmHelper.getNewTempVar();
+    this.emit(`${curBrk} = call i64 @__syscall6(i64 12, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)`);
+    const curBrkPtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${curBrkPtr} = inttoptr i64 ${curBrk} to i8*`);
+    this.emit(`store i8* ${curBrkPtr}, i8** @__heap_brk, align 8`);
+    this.emit(`store i1 true, i1* @__heap_initialized, align 1`);
+    this.emit(`br label %${initEnd}`);
+    this.indentLevel--;
+    this.emit(`${initEnd}:`, false);
+    const oldBrk = this.llvmHelper.getNewTempVar();
+    this.emit(`${oldBrk} = load i8*, i8** @__heap_brk, align 8`);
+    const nextBrk = this.llvmHelper.getNewTempVar();
+    this.emit(`${nextBrk} = getelementptr inbounds i8, i8* ${oldBrk}, i64 ${sizeInt}`);
+    const nextBrkInt = this.llvmHelper.getNewTempVar();
+    this.emit(`${nextBrkInt} = ptrtoint i8* ${nextBrk} to i64`);
+    const brkRes = this.llvmHelper.getNewTempVar();
+    this.emit(`${brkRes} = call i64 @__syscall6(i64 12, i64 ${nextBrkInt}, i64 0, i64 0, i64 0, i64 0, i64 0)`);
+    const brkPtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${brkPtr} = inttoptr i64 ${brkRes} to i8*`);
+    this.emit(`store i8* ${brkPtr}, i8** @__heap_brk, align 8`);
+    // Typed pointer to object
+    const objPtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${objPtr} = bitcast i8* ${oldBrk} to ${classEntry.llvmType}*`);
+    // Call constructor if exists
+    const ctor = classEntry.methods.get('constructor');
+    if (ctor) {
+        const returnType = this.llvmHelper.getLLVMType(ctor.returnType);
+        const paramTypes = ctor.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+        const funcName = `_cls_${className}_constructor`;
+        const argValues = expr.args.map(a => a.accept(this));
+        const callArgs = [];
+        // this
+        callArgs.push(`${classEntry.llvmType}* ${objPtr}`);
+        // user args with basic casts (only int widening and ptr bitcast)
+        argValues.forEach((arg, idx) => {
+            const expected = paramTypes[idx] || arg.type;
+            let val = arg.value;
+            let typ = arg.type;
+            if (expected !== typ) {
+                if (expected.endsWith('*') && typ.endsWith('*')) {
+                    const casted = this.llvmHelper.getNewTempVar();
+                    this.emit(`${casted} = bitcast ${typ} ${val} to ${expected}`);
+                    val = casted;
+                    typ = expected;
+                }
+                else if (expected === 'i64' && typ === 'i32') {
+                    const sext = this.llvmHelper.getNewTempVar();
+                    this.emit(`${sext} = sext i32 ${val} to i64`);
+                    val = sext;
+                    typ = 'i64';
+                }
+            }
+            callArgs.push(`${expected || typ} ${val}`);
+        });
+        if (returnType.startsWith('%struct.') && !returnType.endsWith('*')) {
+            const retTmp = this.llvmHelper.getNewTempVar();
+            this.emit(`${retTmp} = alloca ${returnType}, align ${this.llvmHelper.getAlign(returnType)}`);
+            callArgs.unshift(`${returnType}* ${retTmp}`);
+            this.emit(`call void @_cls_${className}_constructor(${callArgs.join(', ')})`);
+        }
+        else {
+            this.emit(`call ${returnType} @_cls_${className}_constructor(${callArgs.join(', ')})`);
+        }
+    }
+    return { value: objPtr, type: `${classEntry.llvmType}*` };
+}
+visitArrayLiteralExpr(expr, ArrayLiteralExpr);
+IRValue;
+{
+    const elements = expr.elements.map(e => e.accept(this));
+    const context = this.llvmHelper.getContext();
+    if (elements.length === 0) {
+        throw new Error("Empty array literal without type context is not yet supported.");
+    }
+    const elementType = elements[0].type;
+    const arrayStructType = this.llvmHelper.ensureArrayStructDefinition(elementType);
+    // 1. Allocate the array struct
+    const arrayPtr = LLVM.BuildAlloca(this.builder, arrayStructType, "arr_literal_ptr");
+    // 2. Initialize with zero/null (using a simple store of zero-initialized struct if possible, 
+    // or just individual field stores)
+    const zero = LLVM.ConstInt(LLVM.Int64TypeInContext(context), 0, 0);
+    const nullPtr = LLVM.ConstPointerNull(LLVM.PointerType(elementType, 0));
+    const dataFieldPtr = LLVM.BuildStructGEP2(this.builder, arrayStructType, arrayPtr, 0, "");
+    LLVM.BuildStore(this.builder, nullPtr, dataFieldPtr);
+    const lenFieldPtr = LLVM.BuildStructGEP2(this.builder, arrayStructType, arrayPtr, 1, "");
+    LLVM.BuildStore(this.builder, zero, lenFieldPtr);
+    const capFieldPtr = LLVM.BuildStructGEP2(this.builder, arrayStructType, arrayPtr, 2, "");
+    LLVM.BuildStore(this.builder, zero, capFieldPtr);
+    // 3. Append elements using builtin
+    const appendBuiltin = findPredefinedFunction('_builtin_array_append');
+    if (!appendBuiltin) {
+        throw new Error("Builtin _builtin_array_append not found.");
+    }
+    for (const element of elements) {
+        appendBuiltin.handler(this, [
+            { value: arrayPtr, type: LLVM.PointerType(arrayStructType, 0) },
+            element
+        ]);
+    }
+    const loadedArray = LLVM.BuildLoad2(this.builder, arrayStructType, arrayPtr, "arr_literal");
+    return { value: loadedArray, type: arrayStructType, address: arrayPtr };
+}
+visitDeleteExpr(expr, DeleteExpr);
+IRValue;
+{
+    const target = expr.target.accept(this);
+    // Only free heap objects allocated via our brk bump allocator.
+    if (target.type.endsWith('*')) {
+        const ptrAsI8 = this.llvmHelper.getNewTempVar();
+        this.emit(`${ptrAsI8} = bitcast ${target.type} ${target.value} to i8*`);
+        // naive free: reset heap break if this is the top allocation
+        const curBrk = this.llvmHelper.getNewTempVar();
+        this.emit(`${curBrk} = load i8*, i8** @__heap_brk, align 8`);
+        const cmpTop = this.llvmHelper.getNewTempVar();
+        this.emit(`${cmpTop} = icmp eq i8* ${ptrAsI8}, ${curBrk}`);
+        const endLbl = this.getNewLabel('free.end');
+        const doLbl = this.getNewLabel('free.do');
+        this.emit(`br i1 ${cmpTop}, label %${doLbl}, label %${endLbl}`);
+        this.emit(`${doLbl}:`, false);
+        this.indentLevel++;
+        const ptrInt = this.llvmHelper.getNewTempVar();
+        this.emit(`${ptrInt} = ptrtoint i8* ${ptrAsI8} to i64`);
+        this.emit(`call i64 @__syscall6(i64 12, i64 ${ptrInt}, i64 0, i64 0, i64 0, i64 0, i64 0)`);
+        this.emit(`store i8* ${ptrAsI8}, i8** @__heap_brk, align 8`);
+        this.indentLevel--;
+        this.emit(`br label %${endLbl}`);
+        this.emit(`${endLbl}:`, false);
+    }
+    return { value: '', type: 'void' };
+}
+visitFunctionLiteralExpr(expr, FunctionLiteralExpr);
+IRValue;
+{
+    const uniqueFunctionName = this.llvmHelper.getNewUniqueName('closure_func');
+    // Step 1: Analyze for captured variables
+    // `this.currentScope` at this point is the scope *enclosing* the function literal.
+    // The function literal's body will create a new scope at `this.currentScope.depth + 1`.
+    const analyzer = new ClosureAnalyzer(this.currentScope, this.currentScope.depth + 1);
+    expr.body.accept(analyzer); // Analyze the body of the function literal
+    const capturedVariables = analyzer.getCapturedVariables();
+    // Step 2 & 3: Environment struct definition and LLVM function signature
+    let envStructType = null; // LLVM type of the environment struct (e.g., %struct.closure_env_func_X)
+    let envStructPtrType = null; // LLVM pointer type to the environment struct (e.g., %struct.closure_env_func_X*)
+    let envInstancePtr = null; // Pointer to the instance of the environment struct on heap
+    // Define the environment struct if there are captured variables
+    if (capturedVariables.length > 0) {
+        envStructType = `%struct.closure_env_${uniqueFunctionName}`;
+        const envFields = capturedVariables.map(cv => `${cv.llvmType}*`); // Environment stores pointers to captured vars
+        this.emitHoisted(`${envStructType} = type { ${envFields.join(', ')} }`);
+        envStructPtrType = `${envStructType}*`;
+    }
+    // Determine the actual LLVM function's *internal* signature (with env_ptr as first arg)
+    const originalParamLlvmTypes = expr.parameters.map(p => {
+        let type = this.llvmHelper.getLLVMType(p.type);
+        // Apply reference passing for user-defined structs as function parameters
+        if (type.startsWith('%struct.') && type !== LangItems.string.structName) {
+            type = `${type}*`;
+        }
+        return type;
+    });
+    // Always include an env pointer (i8*) as first param for uniform closure calling.
+    let closureFuncLlvmParams = ['i8*'];
+    closureFuncLlvmParams.push(...originalParamLlvmTypes);
+    const returnLlvmType = this.llvmHelper.getLLVMType(expr.returnType);
+    // Final function type for the actual LLVM function (used in 'define')
+    const actualLlvmFuncSignature = `${returnLlvmType} (${closureFuncLlvmParams.join(', ')})`;
+    const closureFuncName = `@${uniqueFunctionName}`;
+    // --- Store current state to restore after generating inner function ---
+    const savedCurrentFunction = this.currentFunction;
+    const savedCurrentScope = this.currentScope;
+    const savedSretPointer = this.sretPointer;
+    // --- END save state ---
+    // Step 4: Emit the actual LLVM function definition (now) into a hoisted buffer
+    const savedBuilder = this.builder;
+    const savedIndent = this.indentLevel;
+    this.builder = [];
+    this.indentLevel = 0;
+    // Temporarily set up context for generating the inner function
+    this.currentFunction = new FunctionDeclaration(new Token(TokenType.IDENTIFIER, uniqueFunctionName, uniqueFunctionName, 0, 0), expr.parameters, expr.returnType, expr.body, false, // Not exported
+    new Token(TokenType.PRIVATE, 'private', 'private', 0, 0), // Private linkage
+    capturedVariables // Pass captured variables here
+    );
+    this.sretPointer = null; // Reset sret for this closure func
+    // Create the new scope for the closure's body
+    this.emit(`define internal ${returnLlvmType} ${closureFuncName}(${closureFuncLlvmParams.map((t, i) => `${t} %arg${i}`).join(', ')}) {`, false);
+    this.indentLevel++;
+    this.emit('entry:', false);
+    this.enterScope(); // New scope for closure's parameters and body locals
+    // Store environment pointer if it exists
+    let envParamName = null;
+    if (envStructPtrType) {
+        envParamName = '%arg0'; // The first parameter is the (generic) environment pointer (i8*)
+        const castedEnv = this.llvmHelper.getNewTempVar();
+        this.emit(`${castedEnv} = bitcast i8* ${envParamName} to ${envStructPtrType}`);
+        // Define it in the current scope for lookup, so visitIdentifierExpr can find it
+        this.currentScope.define('__env_ptr', {
+            llvmType: envStructPtrType,
+            ptr: castedEnv,
+            isPointer: true,
+            definedInScopeDepth: this.currentScope.depth
+        });
+    }
+    else {
+        // Even without captured variables, we still have an env parameter (can be null)
+        envParamName = '%arg0';
+    }
+    // Store incoming parameters into allocas in the closure's new scope
+    let argIdxOffset = envStructPtrType ? 1 : 0;
+    expr.parameters.forEach((p, index) => {
+        const paramName = p.name.lexeme;
+        let paramType = this.llvmHelper.getLLVMType(p.type);
+        // Apply reference passing for user-defined structs
+        if (paramType.startsWith('%struct.') && paramType !== LangItems.string.structName) {
+            paramType = `${paramType}*`;
+        }
+        const paramAlloca = `%p.${paramName}`;
+        const incomingArgName = `%arg${index + argIdxOffset}`;
+        this.emit(`${paramAlloca} = alloca ${paramType}, align ${this.llvmHelper.getAlign(paramType)}`);
+        this.emit(`store ${paramType} ${incomingArgName}, ${paramType}* ${paramAlloca}, align ${this.llvmHelper.getAlign(paramType)}`);
+        this.currentScope.define(paramName, {
+            llvmType: paramType,
+            ptr: paramAlloca,
+            isPointer: paramType.endsWith('*'),
+            definedInScopeDepth: this.currentScope.depth
+        });
+    });
+    // --- Core logic to handle captured variables within the closure's body ---
+    // This is handled by modifying visitIdentifierExpr to check '__env_ptr' if a variable is captured.
+    // Emit the body of the function literal
+    expr.body.accept(this);
+    // Ensure function always returns (even void functions need `ret void`)
+    const lastLine = this.builder[this.builder.length - 1];
+    if (lastLine !== undefined && !lastLine.trim().startsWith('ret ') && !lastLine.trim().startsWith('br ')) {
+        if (returnLlvmType === 'void') {
+            this.emit(`ret void`);
+        }
+        else {
+            this.emit(`unreachable`); // Should be caught by semantic analysis usually
+        }
+    }
+    this.exitScope(); // Exit closure's body scope
+    this.indentLevel--;
+    this.emit('}', false); // End of actual LLVM function definition
+    this.emit('', false);
+    // Capture and hoist the generated function definition, then restore state
+    this.hoistFunctionDefinition(this.builder);
+    this.builder = savedBuilder;
+    this.indentLevel = savedIndent;
+    this.currentFunction = savedCurrentFunction;
+    this.currentScope = savedCurrentScope;
+    this.sretPointer = savedSretPointer;
+    // --- END restore state ---
+    // Step 5: Construct the closure object (function pointer + environment pointer)
+    // This `FunctionLiteralExpr` itself becomes an expression that evaluates to a closure object.
+    // Allocate the environment struct on the heap and store captured variables
+    if (capturedVariables.length > 0) {
+        // Calculate size of environment struct
+        const totalEnvSize = capturedVariables.reduce((sum, cv) => sum + this.llvmHelper.sizeOf(cv.llvmType + '*'), 0);
+        const envRawPtr = this.llvmHelper.getNewTempVar();
+        envInstancePtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${envRawPtr} = call i8* @yulang_malloc(i64 ${totalEnvSize})`); // Allocate environment on heap
+        this.emit(`${envInstancePtr} = bitcast i8* ${envRawPtr} to ${envStructPtrType}`); // Cast to typed pointer
+        capturedVariables.forEach((cv, index) => {
+            // Get the address of the captured variable (which is cv.ptr)
+            // Store this address (pointer to the variable) into the environment struct's field
+            const envFieldPtr = this.llvmHelper.getNewTempVar();
+            const cvPtrType = `${cv.llvmType}*`; // Type of the pointer to the captured variable
+            this.emit(`${envFieldPtr} = getelementptr inbounds ${envStructType}, ${envStructPtrType} ${envInstancePtr}, i32 0, i32 ${index}`);
+            this.emit(`store ${cvPtrType} ${cv.ptr}, ${cvPtrType}* ${envFieldPtr}, align 8`);
+        });
+    }
+    else {
+        envInstancePtr = 'null';
+    }
+    // Create the closure object on the stack (a struct of { func_ptr, env_ptr })
+    // The type of this closure object is `{ actualFuncType*, envStructType }` or just `actualFuncType*` if no capture
+    // Always build a closure object { func_ptr, i8* env_ptr }
+    const closureObjLlvmType = `{ ${actualLlvmFuncSignature}*, i8* }`;
+    const closureObjPtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${closureObjPtr} = alloca ${closureObjLlvmType}, align 8`);
+    // Store function pointer
+    const funcPtrField = this.llvmHelper.getNewTempVar();
+    this.emit(`${funcPtrField} = getelementptr inbounds ${closureObjLlvmType}, ${closureObjLlvmType}* ${closureObjPtr}, i32 0, i32 0`);
+    this.emit(`store ${actualLlvmFuncSignature}* ${closureFuncName}, ${actualLlvmFuncSignature}** ${funcPtrField}, align 8`);
+    // Store environment pointer (bitcast to i8*)
+    const envPtrField = this.llvmHelper.getNewTempVar();
+    this.emit(`${envPtrField} = getelementptr inbounds ${closureObjLlvmType}, ${closureObjLlvmType}* ${closureObjPtr}, i32 0, i32 1`);
+    const envAsI8 = this.llvmHelper.getNewTempVar();
+    const envSource = envStructPtrType ? `${envStructPtrType} ${envInstancePtr}` : `i8* ${envInstancePtr}`;
+    if (envStructPtrType && envInstancePtr !== 'null') {
+        this.emit(`${envAsI8} = bitcast ${envSource} to i8*`);
+        this.emit(`store i8* ${envAsI8}, i8** ${envPtrField}, align 8`);
+    }
+    else {
+        this.emit(`store i8* ${envInstancePtr}, i8** ${envPtrField}, align 8`);
+    }
+    return { value: closureObjPtr, type: `${closureObjLlvmType}*` };
+}
+visitThisExpr(expr, ThisExpr);
+IRValue;
+{
+    // 'this' refers to the current instance (self pointer)
+    // In class methods, 'this' is typically the first implicit parameter.
+    // We need to look it up from the current scope.
+    const entry = this.currentScope.find("this");
+    if (!entry) {
+        throw new Error("Cannot use 'this' outside of a class method.");
+    }
+    const tempVar = this.llvmHelper.getNewTempVar();
+    this.emit(`${tempVar} = load ${entry.llvmType}, ${entry.llvmType}* ${entry.ptr}, align ${this.llvmHelper.getAlign(entry.llvmType)}`);
+    return { value: tempVar, type: entry.llvmType };
+}
+visitAsExpr(expr, AsExpr);
+IRValue;
+{
+    const value = expr.expression.accept(this);
+    const targetLlvmType = this.llvmHelper.getLLVMType(expr.type); // 获取目标 LLVM 类型
+    const isSrcPtr = value.type.endsWith('*');
+    const isDstPtr = targetLlvmType.endsWith('*');
+    const dstIsIntCast = targetLlvmType.startsWith('i') && !isDstPtr;
+    const dstIsFloatCast = targetLlvmType.startsWith('f');
+    // New case: Dereferencing a pointer from `objof` to a value.
+    // e.g., (objof(addr) as int) -> value from `i8*` to `i32`
+    if (isSrcPtr && dstIsIntCast) {
+        const resultVar = this.llvmHelper.getNewTempVar();
+        this.emit(`${resultVar} = ptrtoint ${value.type} ${value.value} to ${targetLlvmType}`);
+        return { value: resultVar, type: targetLlvmType };
+    }
+    if (isSrcPtr && !isDstPtr) {
+        const targetPtrType = targetLlvmType + "*";
+        // 1. Cast the generic pointer (likely i8* from objof) to the correct typed pointer.
+        const castedPtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${castedPtr} = bitcast ${value.type} ${value.value} to ${targetPtrType}`);
+        // 2. Load the value from the typed pointer.
+        const loadedValue = this.llvmHelper.getNewTempVar();
+        this.emit(`${loadedValue} = load ${targetLlvmType}, ${targetPtrType} ${castedPtr}, align ${this.llvmHelper.getAlign(targetLlvmType)}`);
+        return { value: loadedValue, type: targetLlvmType };
+    }
+    if (value.type === targetLlvmType) {
+        return value; // 类型相同，无需转换
+    }
+    const src = value.type;
+    const dst = targetLlvmType;
+    const resultVar = this.llvmHelper.getNewTempVar();
+    const isSrcInt = src.startsWith('i');
+    const isDstInt = dst.startsWith('i');
+    // isSrcPtr and isDstPtr already defined above
+    if (isSrcInt && isDstInt) {
+        const srcBits = parseInt(src.slice(1), 10);
+        const dstBits = parseInt(dst.slice(1), 10);
+        if (dstBits > srcBits) {
+            this.emit(`${resultVar} = sext ${src} ${value.value} to ${dst}`);
+        }
+        else if (dstBits < srcBits) {
+            this.emit(`${resultVar} = trunc ${src} ${value.value} to ${dst}`);
+        }
+        else {
+            this.emit(`${resultVar} = bitcast ${src} ${value.value} to ${dst}`);
+        }
+        return { value: resultVar, type: dst };
+    }
+    if (isSrcPtr && isDstPtr) {
+        this.emit(`${resultVar} = bitcast ${src} ${value.value} to ${dst}`);
+        return { value: resultVar, type: dst };
+    }
+    if (isSrcPtr && isDstInt) {
+        this.emit(`${resultVar} = ptrtoint ${src} ${value.value} to ${dst}`);
+        return { value: resultVar, type: dst };
+    }
+    if (isSrcInt && isDstPtr) {
+        this.emit(`${resultVar} = inttoptr ${src} ${value.value} to ${dst}`);
+        return { value: resultVar, type: dst };
+    }
+    // Fallback
+    this.emit(`${resultVar} = bitcast ${src} ${value.value} to ${dst}`);
+    return { value: resultVar, type: dst };
+}
+visitObjectLiteralExpr(expr, ObjectLiteralExpr);
+IRValue;
+{
+    // If there is an expected struct type (e.g., from `let a: Point = { ... }`), materialize that struct.
+    if (this.objectLiteralExpectedStructType) {
+        const structType = this.objectLiteralExpectedStructType;
+        const className = structType.startsWith('%struct.') ? structType.slice('%struct.'.length) : structType;
+        const classEntry = this.classDefinitions.get(className);
+        if (!classEntry) {
+            throw new Error(`Struct type '${structType}' not found for object literal.`);
+        }
+        // Zero-initialize the target struct, then fill provided fields.
+        const structPtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${structPtr} = alloca ${structType}, align ${this.llvmHelper.getAlign(structType)}`);
+        this.emit(`store ${structType} zeroinitializer, ${structType}* ${structPtr}, align ${this.llvmHelper.getAlign(structType)}`);
+        for (const [keyToken, valueExpr] of expr.properties.entries()) {
+            const member = classEntry.members.get(keyToken.lexeme);
+            if (!member) {
+                throw new Error(`Unknown field '${keyToken.lexeme}' in struct literal for ${structType}.`);
+            }
+            const value = valueExpr.accept(this);
+            let toStore = value;
+            if (value.type === `${member.llvmType}*` && member.llvmType.startsWith('%struct.') && !member.llvmType.endsWith('*')) {
+                const loaded = this.llvmHelper.getNewTempVar();
+                this.emit(`${loaded} = load ${member.llvmType}, ${member.llvmType}* ${value.value}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
+                toStore = { value: loaded, type: member.llvmType };
+            }
+            else if (value.type !== member.llvmType) {
+                toStore = this.coerceValue(value, member.llvmType);
+            }
+            const fieldPtr = this.llvmHelper.getNewTempVar();
+            this.emit(`${fieldPtr} = getelementptr inbounds ${classEntry.llvmType}, ${classEntry.llvmType}* ${structPtr}, i32 0, i32 ${member.index}`);
+            this.emit(`store ${member.llvmType} ${toStore.value}, ${member.llvmType}* ${fieldPtr}, align ${this.llvmHelper.getAlign(member.llvmType)}`);
+        }
+        return { value: structPtr, type: `${structType}*` };
+    }
+    // Compile-time sealed object literal -> unique struct type
+    const literalId = this.objectLiteralCounter++;
+    const structName = `%struct.object_literal_${literalId}`;
+    const classKey = `object_literal_${literalId}`;
+    const fields = [];
+    const membersMap = new Map();
+    const valueList = [];
+    let index = 0;
+    for (const [key, valueExpr] of expr.properties.entries()) {
+        const value = valueExpr.accept(this);
+        valueList.push(value);
+        fields.push(value.type);
+        membersMap.set(key.lexeme, { llvmType: value.type, index });
+        index++;
+    }
+    // Emit struct definition if not already done. Hoist to module scope to keep IR valid.
+    const structDef = `${structName} = type { ${fields.join(', ')} }`;
+    if (!this.classDefinitions.has(classKey)) {
+        this.emitHoisted(structDef);
+        this.classDefinitions.set(classKey, {
+            llvmType: structName,
+            members: membersMap,
+            methods: new Map()
+        });
+    }
+    const objectPtr = this.llvmHelper.getNewTempVar();
+    this.emit(`${objectPtr} = alloca ${structName}, align ${this.llvmHelper.getAlign(structName)}`);
+    // Store each field
+    index = 0;
+    for (const value of valueList) {
+        const fieldPtr = this.llvmHelper.getNewTempVar();
+        this.emit(`${fieldPtr} = getelementptr inbounds ${structName}, ${structName}* ${objectPtr}, i32 0, i32 ${index}`);
+        this.emit(`store ${value.type} ${value.value}, ${value.type}* ${fieldPtr}, align ${this.llvmHelper.getAlign(value.type)}`);
+        index++;
+    }
+    return { value: objectPtr, type: `${structName}*` };
+}
+visitPropertyDeclaration(stmt, PropertyDeclaration);
+void { /* Handled by ClassDeclaration */};
+visitImportStmt(stmt, ImportStmt);
+void {
+    const: sourcePath = stmt.sourcePath.literal,
+    const: namespaceAlias = stmt.namespaceAlias ? stmt.namespaceAlias.lexeme : null,
+    // Resolve module path (mirror declaration_parser)
+    const: currentFileDir = path.dirname(this.sourceFilePath),
+    let, fullModulePath: string,
+    if(sourcePath) { }
+} === 'std' || sourcePath.startsWith('std/');
+{
+    fullModulePath = this.parser.finder.getStdLibModulePath(this.parser.osIdentifier, this.parser.archIdentifier, sourcePath);
+}
+if (path.isAbsolute(sourcePath) || sourcePath.startsWith('/')) {
+    fullModulePath = path.resolve(sourcePath + '.yu');
+}
+else {
+    const currentFileDir = path.dirname(this.parser.currentFilePath);
+    fullModulePath = path.resolve(currentFileDir, sourcePath + '.yu');
+}
+// Build module object (static sealed) and place in global scope
+this.buildModuleObject(fullModulePath);
+const moduleInfo = this.moduleObjects.get(fullModulePath);
+if (!moduleInfo) {
+    throw new Error(`Failed to build module object for ${fullModulePath}`);
+}
+const moduleLookupName = namespaceAlias || fullModulePath; // Use alias if present, else full path
+// This defines the variable `io` as a pointer to the module struct.
+this.globalScope.define(moduleLookupName, {
+    llvmType: `${moduleInfo.structName}*`,
+    ptr: moduleInfo.globalName,
+    isPointer: true,
+    definedInScopeDepth: this.globalScope.depth
+});
+visitDeclareFunction(decl, DeclareFunction);
+void {
+    const: originalFuncName = decl.name.lexeme, // Store original name
+    let, funcNameInIR = originalFuncName,
+    : .mangleStdLib
+};
+{
+    funcNameInIR = `_prog_${funcNameInIR}`;
+}
+const mangledName = `@${funcNameInIR}`;
+const returnType = this.llvmHelper.getLLVMType(decl.returnType);
+const paramsList = decl.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+const paramsString = paramsList.join(', ');
+const funcType = `${returnType} (${paramsList.join(', ')})`;
+// For declared functions, we assume they are function pointers.
+this.globalScope.define(originalFuncName, { llvmType: `${funcType}*`, ptr: mangledName, isPointer: true, definedInScopeDepth: this.globalScope.depth });
+this.emit(`declare ${returnType} ${mangledName}(${paramsString})`, false);
+visitUsingStmt(stmt, UsingStmt);
+void {
+// For now, `using` declarations don't generate any IR directly.
+// They are primarily for providing type information or linking to external libraries,
+// which would be handled in the semantic analysis or linker stages.
+};
+//# sourceMappingURL=ir_generator.js.map

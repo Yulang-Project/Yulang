@@ -67,13 +67,14 @@ export class LLVMIRHelper {
         const llvmStringType = this.getLLVMTypeByName(LangItems.string.structName);
         
         // Get the i8* pointer to the start of the char array
-        const indices = [LLVM.ConstInt(LLVM.Int32TypeInContext(this.context), 0, 0), LLVM.ConstInt(LLVM.Int32TypeInContext(this.context), 0, 0)];
+        const zero = LLVM.ConstInt(LLVM.Int32TypeInContext(this.context), 0, 0);
+        const indices = [zero, zero];
         const charPtrValue = LLVM.ConstInBoundsGEP2(charArrayType, charPtrGlobal, indices, 2);
         
-        const stringStructVal = LLVM.ConstNamedStruct(llvmStringType, [
+        const stringStructVal = LLVM.ConstStructInContext(this.context, [
             charPtrValue,
-            LLVM.ConstInt(LLVM.Int64TypeInContext(this.context), value.length, 0)
-        ], 2);
+            LLVM.ConstInt(LLVM.Int64TypeInContext(this.context), BigInt(value.length) as any, 0)
+        ], 2, 0);
 
         const stringStructGlobal = LLVM.AddGlobal(module, llvmStringType, stringStructGlobalName);
         LLVM.SetInitializer(stringStructGlobal, stringStructVal);

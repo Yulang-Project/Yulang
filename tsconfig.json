@@ -46,6 +46,8 @@
   "exclude": [
     "node_modules",
     "dist",
-    "docs"
+    "docs",
+    "src1",
+    "misc"
   ]
 }

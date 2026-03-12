@@ -1,14 +1,10 @@
-#import "std/io" as io;
-
-fun main(): i32 {
-  io.output("hello\n");
-  let a: array(i32) = [];
-  a.push(1);
-  a.push(2);
-  a.push(3);
-  io.output(a[0]);
-  io.output(a[1]);
-  io.output(a[2]);
-  return 0;
+fun print(msg: string) {
+  let p: i64 = _builtin_string_to_ptr(msg) as i64;
+  let l: i64 = _builtin_string_get_len(msg);
+  syscall(1, 1, p, l);
 }
 
+fun main(): i32 {
+  print("hello\n");
+  return 0;
+}
