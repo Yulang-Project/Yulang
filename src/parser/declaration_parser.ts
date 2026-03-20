@@ -86,9 +86,6 @@ export class DeclarationParser {
         let initializer: Expr | null = null;
         if (this.parser.match(TokenType.EQ)) {
             initializer = this.parser.expression();
-        } else if (this.parser.match(TokenType.ARROW)) { // Handle '->' for implicit address-of assignment
-            const targetExpr = this.parser.expression();
-            initializer = new AddressOfExpr(targetExpr);
         }
         // No semicolon consumption here
         return new LetStmt(name, type, initializer, isExported);
@@ -111,66 +108,51 @@ export class DeclarationParser {
     }
 
     public usingDeclaration(): Stmt {
-        const path = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for #using path.");
-        this.parser.consume(TokenType.AS, "Expect 'as' after #using path.");
-        const alias = this.parser.consume(TokenType.IDENTIFIER, "Expect alias name for #using.");
-        let headPath: Token | null = null;
-        if (this.parser.match(TokenType.HEAD)) {
-            headPath = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for #using head path.");
-        }
-        this.parser.consume(TokenType.SEMICOLON, "Expect ';' after #using declaration.");
-        // 声明还没做
-        return new ExpressionStmt(new LiteralExpr(`USING ${path.lexeme} AS ${alias.lexeme} HEAD ${headPath ? headPath.lexeme : ''}`));
+        throw this.parser.error(this.parser.peek(), "using is no longer supported. Use import instead.");
     }
 
     public importDeclaration(): Stmt {
+        // Syntax: import { ... } from "path";
+        // OR: import * as alias from "path";
+        // OR: import "path";
+        
         let namespaceAlias: Token | null = null;
-        // Syntax: #import "path" as alias;
-        const pathToken = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for import path.");
-        if (this.parser.match(TokenType.AS)) {
+        let isNamespaceImport = false;
+        let namedImports: Token[] = [];
+
+        if (this.parser.match(TokenType.LBRACE)) {
+            // import { a, b } from "path";
+            if (!this.parser.check(TokenType.RBRACE)) {
+                do {
+                    namedImports.push(this.parser.consume(TokenType.IDENTIFIER, "Expect imported name."));
+                } while (this.parser.match(TokenType.COMMA));
+            }
+            this.parser.consume(TokenType.RBRACE, "Expect '}' after imports.");
+            this.parser.consume(TokenType.FROM, "Expect 'from' after import list.");
+        } else if (this.parser.match(TokenType.STAR)) {
+            // import * as alias from "path";
+            isNamespaceImport = true;
+            this.parser.consume(TokenType.AS, "Expect 'as' after '*'.");
             namespaceAlias = this.parser.consume(TokenType.IDENTIFIER, "Expect alias after 'as'.");
+            this.parser.consume(TokenType.FROM, "Expect 'from' after alias.");
         }
+
+        const pathToken = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for import path.");
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after import declaration.");
 
         const modulePath = pathToken.literal as string;
 
-        // Resolve module path using the finder
+        // Resolve module path (simplified for now)
         let fullModulePath: string;
-
-        if (modulePath === 'std' || modulePath.startsWith('std/')) {
-            fullModulePath = this.parser.finder.getStdLibModulePath(
-                this.parser.osIdentifier,
-                this.parser.archIdentifier,
-                modulePath
-            );
-        } else if (path.isAbsolute(modulePath) || modulePath.startsWith('/')) {
-            fullModulePath = path.resolve(modulePath + '.yu');
-        } else {
+        if (modulePath.startsWith('./') || modulePath.startsWith('../')) {
             const currentFileDir = path.dirname(this.parser.currentFilePath);
             fullModulePath = path.resolve(currentFileDir, modulePath + '.yu');
+        } else {
+            // Handle standard library or other paths
+            fullModulePath = modulePath; 
         }
 
-
-        if (!fs.existsSync(fullModulePath)) {
-            throw this.parser.error(pathToken, `Module not found: ${fullModulePath}`);
-        }
-
-        // Check if module already loaded
-        if (this.parser.moduleDeclarations.has(fullModulePath)) {
-            // Module already loaded, just return the AST node
-            return new ImportStmt(pathToken, namespaceAlias);
-        }
-
-        // Load and parse the module
-        const moduleSourceCode = fs.readFileSync(fullModulePath, 'utf8');
-        const moduleLexer = new Lexer(moduleSourceCode);
-        const moduleTokens = moduleLexer.tokenize();
-        const moduleParser = new Parser(moduleTokens, this.parser.finder, this.parser.osIdentifier, this.parser.archIdentifier, fullModulePath); // Pass module's own path for nested imports
-        const moduleStatements = moduleParser.parse(); // Recursively parse the module
-
-        // Store module declarations
-        this.parser.moduleDeclarations.set(fullModulePath, moduleStatements);
-
+        // Return a simplified ImportStmt for now, or you might need to update ImportStmt in ast.ts
         return new ImportStmt(pathToken, namespaceAlias);
     }
 
@@ -178,10 +160,16 @@ export class DeclarationParser {
 
     public classDeclaration(): ClassDeclaration {
         let name: Token;
-        if (this.parser.match(TokenType.IDENTIFIER, TokenType.STRING)) {
+        if (this.parser.match(TokenType.IDENTIFIER)) {
             name = this.parser.previous();
         } else {
             throw this.parser.error(this.parser.peek(), "Expect class name.");
+        }
+
+        let superclass: any = null;
+        if (this.parser.match(TokenType.EXTENDS)) {
+            const superclassName = this.parser.consume(TokenType.IDENTIFIER, "Expect superclass name.");
+            superclass = { name: superclassName }; // Simplified IdentifierExpr
         }
 
         this.parser.consume(TokenType.LBRACE, "Expect '{' before class body.");
@@ -201,14 +189,20 @@ export class DeclarationParser {
                 isStatic = true;
             }
 
-            if (this.parser.match(TokenType.FUN)) {
+            if (this.parser.match(TokenType.FUN) || (this.parser.check(TokenType.IDENTIFIER) && this.parser.peekNext().type === TokenType.LPAREN)) {
+                 // Support 'fun name()' or just 'name()' in class
+                 if (this.parser.check(TokenType.IDENTIFIER)) {
+                     // method name
+                 } else {
+                     this.parser.match(TokenType.FUN);
+                 }
                 methods.push(this.functionDeclaration("function", false, visibility, isStatic));
             } else {
                 properties.push(this.propertyDeclaration(visibility));
             }
         }
         this.parser.consume(TokenType.RBRACE, "Expect '}' after class body.");
-        return new ClassDeclaration(name, properties, methods);
+        return new ClassDeclaration(name, superclass, properties, methods);
     }
 
     public declareFunction(): DeclareFunction {

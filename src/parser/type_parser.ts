@@ -14,13 +14,6 @@ export class TypeParser {
     }
 
     public parse(): TypeAnnotation {
-        if (this.parser.match(TokenType.POINTER)) {
-            this.parser.consume(TokenType.LT, "Expect '<' after 'pointer'.");
-            const baseType = this.parse();
-            this.parser.consume(TokenType.GT, "Expect '>' after pointer base type.");
-            return new PointerTypeAnnotation(baseType);
-        }
-
         if (this.parser.match(TokenType.ARRAY)) {
             this.parser.consume(TokenType.LT, "Expect '<' after 'array'.");
             const elementType = this.parse();

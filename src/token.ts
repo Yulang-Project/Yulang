@@ -2,33 +2,28 @@ export enum TokenType {
     // Keywords
     IMPORT = 'IMPORT',
     FROM = 'FROM',
-    USING = 'USING',
     AS = 'AS',
-    HEAD = 'HEAD',
     MODULE = 'MODULE',
-    LOADDLL = 'LOADDLL',
     FUN = 'FUN',
     EXPORT = 'EXPORT',
-    INT = 'INT',
+    I8 = 'I8',
+    I16 = 'I16',
     I32 = 'I32',
     I64 = 'I64',
+    U8 = 'U8',
+    U16 = 'U16',
+    U32 = 'U32',
+    U64 = 'U64',
     F32 = 'F32',
     F64 = 'F64',
     BOOL = 'BOOL',
     CHAR = 'CHAR',
-    FLOAT = 'FLOAT',
-    DOUBLE = 'DOUBLE',
     STRING = 'STRING',
-    BIND = 'BIND',
-    OFFER = 'OFFER',
     DELETE = 'DELETE',
     LET = 'LET',
     CONST = 'CONST',
     THIS = 'THIS',
     RETURN = 'RETURN',
-    SYSCALL = 'SYSCALL',
-    ADDROF = 'ADDROF',
-    OBJOF = 'OBJOF',
     IF = 'IF',
     ELSE = 'ELSE',
     FOR = 'FOR',
@@ -36,25 +31,25 @@ export enum TokenType {
     BREAK = 'BREAK',
     CONTINUE = 'CONTINUE',
     DECLARE = 'DECLARE',
-    INTERFACE = 'INTERFACE',
     CLASS = 'CLASS',
     STRUCT = 'STRUCT',
     NEW = 'NEW',
     PUBLIC = 'PUBLIC',
     PRIVATE = 'PRIVATE',
     STATIC = 'STATIC',
-    ARRAY = 'ARRAY', // NEW: Add ARRAY token
-    OBJECT = 'OBJECT', // NEW: Add OBJECT token
-    POINTER = 'POINTER', // NEW: Add POINTER token
-    TRUE = 'TRUE', // NEW: Add TRUE token
-    FALSE = 'FALSE', // NEW: Add FALSE token
+    ARRAY = 'ARRAY',
+    OBJECT = 'OBJECT',
+    TRUE = 'TRUE',
+    FALSE = 'FALSE',
+    EXTENDS = 'EXTENDS',
+
     // Identifiers
     IDENTIFIER = 'IDENTIFIER',
 
     // Literals
     NUMBER = 'NUMBER',
     STRING_LITERAL = 'STRING_LITERAL',
-    CHAR_LITERAL = 'CHAR_LITERAL', // New: Character literal
+    CHAR_LITERAL = 'CHAR_LITERAL',
 
     // Operators
     PLUS = 'PLUS',
@@ -71,13 +66,12 @@ export enum TokenType {
     BANG = 'BANG', // !
     AMPERSAND = 'AMPERSAND', // &
     AMP_AMP = 'AMP_AMP', // &&
-    PIPE = 'PIPE', // | (NEW)
+    PIPE = 'PIPE', // |
     PIPE_PIPE = 'PIPE_PIPE', // ||
-    CARET = 'CARET', // ^ (新增)
-    PERCENT = 'PERCENT', // % (新增)
-    LT_LT = 'LT_LT', // << (新增)
-    GT_GT = 'GT_GT', // >> (新增)
-    ARROW = 'ARROW', // -> (legacy, no longer used for pointer init)
+    CARET = 'CARET',
+    PERCENT = 'PERCENT',
+    LT_LT = 'LT_LT',
+    GT_GT = 'GT_GT',
 
     // Delimiters/Punctuators
     LPAREN = 'LPAREN', // (
@@ -90,11 +84,10 @@ export enum TokenType {
     SEMICOLON = 'SEMICOLON', // ;
     COLON = 'COLON', // :
     DOT = 'DOT', // .
-    HASH = 'HASH', // #
 
     // Special
-    EOF = 'EOF', // End of File
-    UNKNOWN = 'UNKNOWN', // For unrecognized characters
+    EOF = 'EOF',
+    UNKNOWN = 'UNKNOWN',
 }
 
 export class Token {
@@ -111,41 +104,35 @@ export class Token {
     }
 }
 
-// Map of keywords for quick lookup (use null-prototype object to avoid inheriting 'constructor')
+// Map of keywords for quick lookup
 export const keywords: { [key: string]: TokenType } = Object.create(null);
 
 Object.assign(keywords, {
-    // Preprocessor Directives
-    '#import': TokenType.IMPORT,
+    'import': TokenType.IMPORT,
     'from': TokenType.FROM,
-    '#using': TokenType.USING,
-
-    // Keywords
     'as': TokenType.AS,
-    'head': TokenType.HEAD,
     'module': TokenType.MODULE,
-    'LoadDLL': TokenType.LOADDLL,
     'fun': TokenType.FUN,
+    'function': TokenType.FUN,
     'export': TokenType.EXPORT,
-    // Preferred primitive type keywords
+    'i8': TokenType.I8,
+    'i16': TokenType.I16,
     'i32': TokenType.I32,
     'i64': TokenType.I64,
+    'u8': TokenType.U8,
+    'u16': TokenType.U16,
+    'u32': TokenType.U32,
+    'u64': TokenType.U64,
     'f32': TokenType.F32,
     'f64': TokenType.F64,
     'bool': TokenType.BOOL,
     'char': TokenType.CHAR,
     'string': TokenType.STRING,
-
-    'bind': TokenType.BIND,
-    'offer': TokenType.OFFER,
     'delete': TokenType.DELETE,
     'let': TokenType.LET,
     'const': TokenType.CONST,
     'this': TokenType.THIS,
     'return': TokenType.RETURN,
-    'syscall': TokenType.SYSCALL,
-    'addrof': TokenType.ADDROF,
-    'objof': TokenType.OBJOF,
     'if': TokenType.IF,
     'else': TokenType.ELSE,
     'for': TokenType.FOR,
@@ -153,16 +140,16 @@ Object.assign(keywords, {
     'break': TokenType.BREAK,
     'continue': TokenType.CONTINUE,
     'declare': TokenType.DECLARE,
-    'interface': TokenType.INTERFACE,
     'class': TokenType.CLASS,
-    'struct': TokenType.STRUCT, // NEW
+    'struct': TokenType.STRUCT,
     'new': TokenType.NEW,
     'public': TokenType.PUBLIC,
     'private': TokenType.PRIVATE,
     'static': TokenType.STATIC,
     'array': TokenType.ARRAY,
-    'object': TokenType.OBJECT, // NEW
-    'pointer': TokenType.POINTER,
-    'true': TokenType.TRUE, // NEW
-    'false': TokenType.FALSE, // NEW
-})
+    'object': TokenType.OBJECT,
+    'true': TokenType.TRUE,
+    'false': TokenType.FALSE,
+    'extends': TokenType.EXTENDS,
+});
+

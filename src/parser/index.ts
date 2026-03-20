@@ -57,28 +57,28 @@ export class Parser {
             const isExported = this.match(TokenType.EXPORT);
 
             if (this.match(TokenType.CLASS)) return this.declarationParser.classDeclaration();
-            if (this.match(TokenType.STRUCT)) return this.declarationParser.structDeclaration(); // NEW: Handle struct declarations
+            if (this.match(TokenType.STRUCT)) return this.declarationParser.structDeclaration();
             if (this.match(TokenType.FUN)) return this.declarationParser.functionDeclaration("function", isExported);
-            if (this.match(TokenType.LET)) return this.declarationParser.letDeclaration(isExported); // Global let
-            if (this.match(TokenType.CONST)) return this.declarationParser.constDeclaration(isExported); // Global const
+            if (this.match(TokenType.LET)) return this.declarationParser.letDeclaration(isExported);
+            if (this.match(TokenType.CONST)) return this.declarationParser.constDeclaration(isExported);
             
             if (isExported) {
-                throw this.error(this.peek(), "Expect 'fun', 'class', or 'struct' after 'export'.");
+                // Handle 'export { a, b }' or similar if needed, for now just error
+                throw this.error(this.peek(), "Expect 'fun', 'class', 'let', 'const' or 'struct' after 'export'.");
             }
 
-            if (this.match(TokenType.USING)) return this.declarationParser.usingDeclaration();
             if (this.match(TokenType.IMPORT)) return this.declarationParser.importDeclaration();
             if (this.match(TokenType.DECLARE)) {
                 if (this.match(TokenType.CLASS)) {
-                    return this.declarationParser.classDeclaration(); // Re-use classDeclaration for 'declare class'
+                    return this.declarationParser.classDeclaration();
                 }
                 if (this.match(TokenType.STRUCT)) {
-                    return this.declarationParser.structDeclaration(); // NEW: Handle 'declare struct'
+                    return this.declarationParser.structDeclaration();
                 }
                 return this.declarationParser.declareFunction();
             }
 
-            throw this.error(this.peek(), "Expect a top-level declaration (class, fun, let, import, declare, export).");
+            throw this.error(this.peek(), "Expect a top-level declaration (class, fun, let, const, import, declare, export).");
         } catch (error: any) {
             if (error instanceof ParseError) {
                 this.synchronize();
@@ -194,7 +194,6 @@ export class Parser {
                 case TokenType.WHILE:
                 case TokenType.RETURN:
                 case TokenType.EXPORT:
-                case TokenType.USING:
                 case TokenType.IMPORT:
                     return;
             }

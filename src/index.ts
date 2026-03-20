@@ -186,13 +186,11 @@ cli
           execFileSync('llc', ['-filetype=obj', '-relocation-model=pic', llPath, '-o', objPath], { stdio: 'inherit' });
 
           if (options.target === 'exec') {
-            // 5. Link object file into an executable（仅引导+用户目标，不再预编译 std）
-            const bootstrapPath = finder.getBootstrapPath(osIdentifier, archIdentifier);
-            const dynamicLinker = finder.getLinkerDynamicLinker(osIdentifier, archIdentifier);
+            // 5. Link object file into an executable using gcc
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
-            const linkerCommand = platform.getArchIdentifier() === 'arm64' ? 'aarch64-linux-gnu-ld' : 'ld';
-            console.log(`  [CMD] ${linkerCommand} -o ${outputFilePath} ${bootstrapPath} ${objPath} -dynamic-linker ${dynamicLinker} ${linkerFlags.join(' ')}`);
-            execFileSync(linkerCommand, ['-o', outputFilePath, bootstrapPath, objPath, '-dynamic-linker', dynamicLinker, ...linkerFlags], { stdio: 'inherit' });
+            const cc = 'gcc';
+            console.log(`  [CMD] ${cc} -o ${outputFilePath} ${objPath} ${linkerFlags.join(' ')}`);
+            execFileSync(cc, ['-o', outputFilePath, objPath, ...linkerFlags], { stdio: 'inherit' });
           } else if (options.target === 'static-lib') {
             // 5. Create static library (.a)
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);

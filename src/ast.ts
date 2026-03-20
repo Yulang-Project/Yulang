@@ -261,6 +261,7 @@ export class DeclareFunction extends Stmt {
 export class ClassDeclaration extends Stmt {
     constructor(
         public name: Token,
+        public superclass: IdentifierExpr | null,
         public properties: PropertyDeclaration[],
         public methods: FunctionDeclaration[],
         public isExported: boolean = false,

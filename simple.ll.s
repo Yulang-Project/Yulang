@@ -12,8 +12,8 @@ print:                                  # @print
 	movq	%rdi, -16(%rsp)
 	movq	%rdi, -24(%rsp)
 	movq	%rdx, -32(%rsp)
-	movl	$1, %eax
 	movl	$1, %edi
+	movl	$1, %eax
 	#APP
 	syscall
 	#NO_APP

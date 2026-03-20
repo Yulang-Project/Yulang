@@ -10,14 +10,14 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
             if (args.length !== 1) throw new Error("_builtin_string_to_ptr requires 1 argument.");
             const strVal = args[0]!;
             const context = generator.llvmHelper.getContext();
-            const structType = generator.llvmHelper.getLLVMTypeByName(LangItems.string.structName);
+            const structType = generator.stringStructType;
             
-            // If it's already a pointer to struct, use it directly, otherwise we'd need its address
-            const arrayPtr = strVal.address || strVal.value;
-            const dataFieldPtr = LLVM.BuildStructGEP2(generator.builder, structType, arrayPtr, 0, "");
-            const ptr = LLVM.BuildLoad2(generator.builder, LLVM.PointerType(LLVM.Int8TypeInContext(context), 0), dataFieldPtr, "");
+            const stringPtr = strVal.address || strVal.value;
+            const dataFieldPtr = LLVM.BuildStructGEP2(generator.builder, structType, stringPtr, 0, "str_ptr_gep");
+            const i8PtrType = LLVM.PointerType(LLVM.Int8TypeInContext(context), 0);
+            const ptr = LLVM.BuildLoad2(generator.builder, i8PtrType, dataFieldPtr, "str_ptr");
             
-            return { value: ptr, type: LLVM.PointerType(LLVM.Int8TypeInContext(context), 0) };
+            return { value: ptr, type: i8PtrType };
         }
     },
     {
@@ -25,13 +25,15 @@ const BUILTIN_FUNCTIONS: PredefinedFunction[] = [
         handler: (generator, args) => {
             if (args.length !== 1) throw new Error("_builtin_string_get_len requires 1 argument.");
             const strVal = args[0]!;
-            const structType = generator.llvmHelper.getLLVMTypeByName(LangItems.string.structName);
+            const context = generator.llvmHelper.getContext();
+            const structType = generator.stringStructType;
             
-            const arrayPtr = strVal.address || strVal.value;
-            const lenFieldPtr = LLVM.BuildStructGEP2(generator.builder, structType, arrayPtr, 1, "");
-            const len = LLVM.BuildLoad2(generator.builder, LLVM.Int64TypeInContext(generator.llvmHelper.getContext()), lenFieldPtr, "");
+            const stringPtr = strVal.address || strVal.value;
+            const lenFieldPtr = LLVM.BuildStructGEP2(generator.builder, structType, stringPtr, 1, "str_len_gep");
+            const i64Type = LLVM.Int64TypeInContext(context);
+            const len = LLVM.BuildLoad2(generator.builder, i64Type, lenFieldPtr, "str_len");
             
-            return { value: len, type: LLVM.Int64TypeInContext(generator.llvmHelper.getContext()) };
+            return { value: len, type: i64Type };
         }
     }
 ];

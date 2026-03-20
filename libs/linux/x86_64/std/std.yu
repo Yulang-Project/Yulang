@@ -1,3 +1,0 @@
-export fun strlen(str: string): i64 {
-    return _builtin_string_get_len(str)
-}

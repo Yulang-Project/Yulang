@@ -260,7 +260,7 @@ export class ExpressionParser {
             return new LiteralExpr(false);
         }
 
-        if (this.parser.match(TokenType.IDENTIFIER, TokenType.SYSCALL, TokenType.ADDROF, TokenType.OBJOF)) {
+        if (this.parser.match(TokenType.IDENTIFIER)) {
             return new IdentifierExpr(this.parser.previous());
         }
 

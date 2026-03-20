@@ -169,11 +169,6 @@ export class Lexer {
     }
 
     private identifierOrKeyword(): void {
-        // Handle '#' as part of keywords like #import
-        if (this.source.charAt(this.start) === '#') {
-            this.advance(); // consume '#'
-        }
-
         while (this.isAlphaNumeric(this.peek())) {
             this.advance();
         }
@@ -183,10 +178,7 @@ export class Lexer {
 
         if (tokenType) {
             this.addToken(tokenType);
-        } else if (text.startsWith('#')) {
-             this.addToken(TokenType.UNKNOWN, "Unrecognized preprocessor directive");
-        }
-        else {
+        } else {
             this.addToken(TokenType.IDENTIFIER);
         }
     }
@@ -209,16 +201,15 @@ export class Lexer {
 
             case '+': this.addToken(TokenType.PLUS); break;
             case '*': this.addToken(TokenType.STAR); break;
-            case '%': this.addToken(TokenType.PERCENT); break; // Add PERCENT
+            case '%': this.addToken(TokenType.PERCENT); break;
             case '/':
                 if (this.match('/')) {
-                    // A single-line comment goes until the end of the line.
                     while (this.peek() !== '\n' && !this.isAtEnd()) this.advance();
                 } else if (this.match('*')) {
                     while (!(this.peek() === '*' && this.peekNext() === '/') && !this.isAtEnd()) {
                         if (this.peek() === '\n') {
                             this.line++;
-                            this.column = 1; // Reset column on new line
+                            this.column = 1;
                         }
                         this.advance();
                     }
@@ -226,8 +217,8 @@ export class Lexer {
                     if (this.isAtEnd()) {
                         this.addToken(TokenType.UNKNOWN, "Unclosed multi-line comment");
                     } else {
-                        this.advance(); // consume '*'
-                        this.advance(); // consume '/'
+                        this.advance();
+                        this.advance();
                     }
                 }
                 else {
@@ -236,7 +227,7 @@ export class Lexer {
                 break;
 
             case '-':
-                this.addToken(this.match('>') ? TokenType.ARROW : TokenType.MINUS);
+                this.addToken(TokenType.MINUS);
                 break;
             case '=':
                 this.addToken(this.match('=') ? TokenType.EQ_EQ : TokenType.EQ);
@@ -246,19 +237,19 @@ export class Lexer {
                 break;
             case '<':
                 if (this.match('<')) {
-                    this.addToken(TokenType.LT_LT); // Add LT_LT
+                    this.addToken(TokenType.LT_LT);
                 } else {
                     this.addToken(this.match('=') ? TokenType.LT_EQ : TokenType.LT);
                 }
                 break;
             case '>':
                 if (this.match('>')) {
-                    this.addToken(TokenType.GT_GT); // Add GT_GT
+                    this.addToken(TokenType.GT_GT);
                 } else {
                     this.addToken(this.match('=') ? TokenType.GT_EQ : TokenType.GT);
                 }
                 break;
-            case '^': this.addToken(TokenType.CARET); break; // Add CARET
+            case '^': this.addToken(TokenType.CARET); break;
 
             case '&':
                 if (this.match('&')) {
@@ -271,7 +262,7 @@ export class Lexer {
                 if (this.match('|')) {
                     this.addToken(TokenType.PIPE_PIPE);
                 } else {
-                    this.addToken(TokenType.PIPE); // Single | for bitwise OR
+                    this.addToken(TokenType.PIPE);
                 }
                 break;
 
@@ -288,11 +279,6 @@ export class Lexer {
             case '\n':
                 this.line++;
                 this.column = 1;
-                break;
-            
-            case '#':
-                // It's a preprocessor directive, which is handled as an identifier
-                this.identifierOrKeyword();
                 break;
 
             default:

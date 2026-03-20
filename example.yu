@@ -1,0 +1,13 @@
+// example.yu
+import "stdio"; // This is just for show now, clib is built-in
+
+export function main(): i32 {
+    let msg: string = "Hello, TypeScript-like YuLang!";
+    clib.printf("Message: %s\n", msg.ptr);
+    clib.printf("Length: %d\n", msg.length);
+    
+    let arr: array<i32> = [1, 2, 3];
+    // arr.length not fully implemented in IR yet, but syntax is there
+    
+    return 0;
+}
