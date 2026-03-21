@@ -1,0 +1,7 @@
+import { add } from "./std";
+
+export function main(): i32 {
+    let result: i32 = add(40, 2);
+    clib.printf("named import result = %d\n", result);
+    return 0;
+}

@@ -117,7 +117,6 @@ export class DeclarationParser {
         // OR: import "path";
         
         let namespaceAlias: Token | null = null;
-        let isNamespaceImport = false;
         let namedImports: Token[] = [];
 
         if (this.parser.match(TokenType.LBRACE)) {
@@ -131,7 +130,6 @@ export class DeclarationParser {
             this.parser.consume(TokenType.FROM, "Expect 'from' after import list.");
         } else if (this.parser.match(TokenType.STAR)) {
             // import * as alias from "path";
-            isNamespaceImport = true;
             this.parser.consume(TokenType.AS, "Expect 'as' after '*'.");
             namespaceAlias = this.parser.consume(TokenType.IDENTIFIER, "Expect alias after 'as'.");
             this.parser.consume(TokenType.FROM, "Expect 'from' after alias.");
@@ -140,20 +138,109 @@ export class DeclarationParser {
         const pathToken = this.parser.consume(TokenType.STRING_LITERAL, "Expect string literal for import path.");
         this.parser.consume(TokenType.SEMICOLON, "Expect ';' after import declaration.");
 
-        const modulePath = pathToken.literal as string;
+        return new ImportStmt(
+            pathToken,
+            namespaceAlias,
+            namedImports.length > 0 ? namedImports : null
+        );
+    }
 
-        // Resolve module path (simplified for now)
-        let fullModulePath: string;
-        if (modulePath.startsWith('./') || modulePath.startsWith('../')) {
-            const currentFileDir = path.dirname(this.parser.currentFilePath);
-            fullModulePath = path.resolve(currentFileDir, modulePath + '.yu');
-        } else {
-            // Handle standard library or other paths
-            fullModulePath = modulePath; 
+    public resolveImportDeclaration(importStmt: ImportStmt): Stmt[] {
+        const modulePath = importStmt.sourcePath.literal as string;
+        const fullModulePath = this.resolveImportPath(modulePath);
+        const moduleDeclarations = this.loadModuleDeclarations(fullModulePath);
+
+        const exportedMap = new Map<string, Stmt>();
+        for (const declaration of moduleDeclarations) {
+            const exportName = this.getExportedDeclarationName(declaration);
+            if (exportName) {
+                exportedMap.set(exportName, declaration);
+            }
         }
 
-        // Return a simplified ImportStmt for now, or you might need to update ImportStmt in ast.ts
-        return new ImportStmt(pathToken, namespaceAlias);
+        if (importStmt.namespaceAlias) {
+            this.parser.namespaceImports.set(importStmt.namespaceAlias.lexeme, new Map(
+                Array.from(exportedMap.keys()).map((name) => [name, name])
+            ));
+            return Array.from(exportedMap.values());
+        }
+
+        if (importStmt.namedImports && importStmt.namedImports.length > 0) {
+            const declarations: Stmt[] = [];
+            for (const importedNameToken of importStmt.namedImports) {
+                const importedName = importedNameToken.lexeme;
+                const declaration = exportedMap.get(importedName);
+                if (!declaration) {
+                    throw new Error(
+                        `Module '${modulePath}' does not export '${importedName}'. (${this.parser.currentFilePath})`
+                    );
+                }
+                declarations.push(declaration);
+            }
+            return declarations;
+        }
+
+        return Array.from(exportedMap.values());
+    }
+
+    private resolveImportPath(modulePath: string): string {
+        const ensureYuExt = (filePath: string): string => {
+            return filePath.endsWith('.yu') ? filePath : `${filePath}.yu`;
+        };
+
+        if (modulePath.startsWith('./') || modulePath.startsWith('../')) {
+            const currentFileDir = path.dirname(this.parser.currentFilePath);
+            return path.resolve(currentFileDir, ensureYuExt(modulePath));
+        }
+
+        if (modulePath.startsWith('/')) {
+            return path.resolve(ensureYuExt(modulePath));
+        }
+
+        return this.parser.finder.getStdLibModulePath(
+            this.parser.osIdentifier,
+            this.parser.archIdentifier,
+            modulePath
+        );
+    }
+
+    private loadModuleDeclarations(fullModulePath: string): Stmt[] {
+        if (this.parser.moduleDeclarations.has(fullModulePath)) {
+            return this.parser.moduleDeclarations.get(fullModulePath)!;
+        }
+
+        if (!fs.existsSync(fullModulePath)) {
+            throw new Error(`Imported module not found: ${fullModulePath}`);
+        }
+
+        this.parser.moduleDeclarations.set(fullModulePath, []);
+
+        const source = fs.readFileSync(fullModulePath, 'utf8');
+        const lexer = new Lexer(source);
+        const tokens = lexer.tokenize();
+        const moduleParser = new Parser(
+            tokens,
+            this.parser.finder,
+            this.parser.osIdentifier,
+            this.parser.archIdentifier,
+            fullModulePath
+        );
+
+        moduleParser.moduleDeclarations = this.parser.moduleDeclarations;
+        moduleParser.namespaceImports = this.parser.namespaceImports;
+
+        const declarations = moduleParser.parse();
+        this.parser.moduleDeclarations.set(fullModulePath, declarations);
+        return declarations;
+    }
+
+    private getExportedDeclarationName(statement: Stmt): string | null {
+        if (statement instanceof FunctionDeclaration && statement.isExported) return statement.name.lexeme;
+        if (statement instanceof LetStmt && statement.isExported) return statement.name.lexeme;
+        if (statement instanceof ConstStmt && statement.isExported) return statement.name.lexeme;
+        if (statement instanceof ClassDeclaration && statement.isExported) return statement.name.lexeme;
+        if (statement instanceof StructDeclaration && statement.isExported) return statement.name.lexeme;
+        return null;
     }
 
 

@@ -8,6 +8,7 @@ import { DeclarationParser } from './declaration_parser.js';
 import { StatementParser } from './statement_parser.js';
 import { TypeParser } from './type_parser.js';
 import type { IFinder } from '../Finder.js'; // NEW: Import IFinder
+import { ImportStmt } from '../ast.js';
 
 
 class ParseError extends Error {
@@ -24,6 +25,7 @@ export class Parser {
     public statementParser: StatementParser;
     public typeParser: TypeParser;
     public moduleDeclarations: Map<string, Stmt[]> = new Map();
+    public namespaceImports: Map<string, Map<string, string>> = new Map();
     public finder: IFinder;
     public osIdentifier: string;
     public archIdentifier: string;
@@ -46,6 +48,11 @@ export class Parser {
         while (!this.isAtEnd()) {
             const declaration = this.topLevelDeclaration();
             if (declaration !== null) {
+                if (declaration instanceof ImportStmt) {
+                    const importedDeclarations = this.declarationParser.resolveImportDeclaration(declaration);
+                    statements.push(...importedDeclarations);
+                    continue;
+                }
                 statements.push(declaration);
             }
         }
@@ -56,8 +63,16 @@ export class Parser {
         try {
             const isExported = this.match(TokenType.EXPORT);
 
-            if (this.match(TokenType.CLASS)) return this.declarationParser.classDeclaration();
-            if (this.match(TokenType.STRUCT)) return this.declarationParser.structDeclaration();
+            if (this.match(TokenType.CLASS)) {
+                const declaration = this.declarationParser.classDeclaration();
+                declaration.isExported = isExported;
+                return declaration;
+            }
+            if (this.match(TokenType.STRUCT)) {
+                const declaration = this.declarationParser.structDeclaration();
+                declaration.isExported = isExported;
+                return declaration;
+            }
             if (this.match(TokenType.FUN)) return this.declarationParser.functionDeclaration("function", isExported);
             if (this.match(TokenType.LET)) return this.declarationParser.letDeclaration(isExported);
             if (this.match(TokenType.CONST)) return this.declarationParser.constDeclaration(isExported);

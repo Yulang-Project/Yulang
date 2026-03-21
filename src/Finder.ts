@@ -1,5 +1,6 @@
 // src/Finder.ts
 import * as path from 'path';
+import * as fs from 'fs';
 
 // 定义标准库查找器的接口
 export interface IFinder {
@@ -19,18 +20,26 @@ export class ProjectFinder implements IFinder {
 
     // 获取标准库模块的完整路径 (e.g., "std/io" -> "/path/to/project_root/libs/linux/x86_64/std/io.yu")
     getStdLibModulePath(osIdentifier: string, archIdentifier: string, moduleName: string): string {
-        // 构建标准库模块的基路径，例如 "libs/linux/x86_64/std"
-        const stdLibBaseDir = path.join(this.stdLibRootPath, osIdentifier, archIdentifier, 'std');
+        const normalizedModuleName = moduleName.endsWith('/') ? moduleName.slice(0, -1) : moduleName;
+        const resolvedModuleName = normalizedModuleName.startsWith('std:')
+            ? normalizedModuleName.replace(/:/g, '/')
+            : normalizedModuleName;
 
-        if (moduleName === 'std' || moduleName === 'std/') {
-            return path.join(this.projectRoot, stdLibBaseDir, 'std.yu');
+        const candidatePaths = [
+            path.join(this.projectRoot, this.stdLibRootPath, `${resolvedModuleName}.yu`),
+            path.join(this.projectRoot, this.stdLibRootPath, resolvedModuleName, 'index.yu'),
+            path.join(this.projectRoot, this.stdLibRootPath, osIdentifier, archIdentifier, `${resolvedModuleName}.yu`),
+            path.join(this.projectRoot, this.stdLibRootPath, osIdentifier, archIdentifier, resolvedModuleName, 'index.yu'),
+            path.join(this.projectRoot, this.stdLibRootPath, osIdentifier, archIdentifier, 'std', `${resolvedModuleName}.yu`),
+        ];
+
+        for (const candidatePath of candidatePaths) {
+            if (fs.existsSync(candidatePath)) {
+                return candidatePath;
+            }
         }
 
-        const relativeModuleName = moduleName.startsWith('std/') ? moduleName.slice(4) : moduleName;
-        
-        // 构建模块的完整路径，例如 "/path/to/project_root/libs/linux/x86_64/std/io.yu"
-        const fullPath = path.join(this.projectRoot, stdLibBaseDir, `${relativeModuleName}.yu`);
-        return fullPath;
+        return candidatePaths[0]!;
     }
 
     // 获取额外的链接器标志

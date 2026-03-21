@@ -1,0 +1,11 @@
+export function print(text: string): i32 {
+    return clib.printf("%s", text.ptr);
+}
+
+export function println(text: string): i32 {
+    return clib.printf("%s\n", text.ptr);
+}
+
+export function cputs(text: string): i32 {
+    return clib.puts(text.ptr);
+}

@@ -1,0 +1,7 @@
+import * as std from "./std";
+
+export function main(): i32 {
+    let result: i32 = std.add(20, 22);
+    clib.printf("namespace import result = %d\n", result);
+    return 0;
+}

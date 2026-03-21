@@ -282,8 +282,9 @@ export class StructDeclaration extends Stmt {
 
 export class ImportStmt extends Stmt {
     constructor(
-        public sourcePath: Token, // 导入的模块路径，例如 "modulePath"
-        public namespaceAlias: Token | null, // 命名空间别名，例如 `identifier` (for `import identifier from ...`)
+        public sourcePath: Token,
+        public namespaceAlias: Token | null,
+        public namedImports: Token[] | null = null, // NEW
         public isDeclare: boolean = false
     ) { super(); }
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitImportStmt(this); }
@@ -409,9 +410,16 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
         return this.parenthesize(`${visibility} ${stmt.name.lexeme}${typeStr} =`, stmt.initializer);
     }
     visitImportStmt(stmt: ImportStmt): string {
-        // Updated to use sourcePath and namespaceAlias
-        const aliasPart = stmt.namespaceAlias ? ` as ${stmt.namespaceAlias.lexeme}` : '';
-        return this.parenthesize(`import ${stmt.sourcePath.literal}${aliasPart}`);
+        if (stmt.namedImports && stmt.namedImports.length > 0) {
+            const names = stmt.namedImports.map((token) => token.lexeme).join(', ');
+            return this.parenthesize(`import { ${names} } from ${stmt.sourcePath.literal}`);
+        }
+
+        if (stmt.namespaceAlias) {
+            return this.parenthesize(`import * as ${stmt.namespaceAlias.lexeme} from ${stmt.sourcePath.literal}`);
+        }
+
+        return this.parenthesize(`import ${stmt.sourcePath.literal}`);
     }
     visitDeclareFunction(decl: DeclareFunction): string {
         const params = decl.parameters.map(p => {

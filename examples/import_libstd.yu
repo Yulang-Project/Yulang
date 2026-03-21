@@ -1,0 +1,9 @@
+import { add } from "std:index";
+import { println } from "std:io";
+
+export function main(): i32 {
+    let result: i32 = add(1, 2);
+    println("lib std result:");
+    println(result as string);
+    return 0;
+}

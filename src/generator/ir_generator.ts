@@ -38,6 +38,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     public stringStructType: LLVMTypeRef = null as any;
     private objectStructType: LLVMTypeRef = null as any;
     private pass: 'declaration' | 'definition' = 'declaration';
+    private namespaceImports: Map<string, Map<string, string>>;
     public indentLevel: number = 0;
     private labelCounter: number = 0;
 
@@ -45,14 +46,87 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const context = this.llvmHelper.getContext();
         this.module = LLVM.ModuleCreateWithNameInContext(path, context);
         this.builder = LLVM.CreateBuilderInContext(context);
+        this.namespaceImports = parser.namespaceImports;
         this.llvmHelper.setGenerator(this);
         this.emitLangItemStructs();
+    }
+
+    private resolveSymbolValue(name: string): IRValue {
+        const entry = this.currentScope.find(name);
+        if (!entry) throw new Error(`Unknown identifier: ${name}`);
+        const kind = LLVM.GetTypeKind(entry.llvmType);
+        if (kind === 11 || kind === 9) {
+            return { value: entry.ptr, type: LLVM.PointerType(entry.llvmType, 0), pointeeType: entry.llvmType };
+        }
+        return {
+            value: LLVM.BuildLoad2(this.builder, entry.llvmType, entry.ptr, name),
+            type: entry.llvmType,
+            address: entry.ptr
+        };
     }
 
     private toPtrArr(arr: any[]) { return arr; }
     public emit(ir: string, indent: boolean = true) {}
     public getNewLabel(prefix: string) { return `${prefix}.${this.labelCounter++}`; }
     public getModule() { return this.module; }
+
+    private isIntegerLikeType(type: LLVMTypeRef): boolean {
+        const ctx = this.llvmHelper.getContext();
+        if (LLVM.GetTypeKind(type) === 8) {
+            return true;
+        }
+        return type === LLVM.Int1TypeInContext(ctx)
+            || type === LLVM.Int8TypeInContext(ctx)
+            || type === LLVM.Int16TypeInContext(ctx)
+            || type === LLVM.Int32TypeInContext(ctx)
+            || type === LLVM.Int64TypeInContext(ctx);
+    }
+
+    private getGlobalCStringPtr(value: string): LLVMValueRef {
+        const entry = this.llvmHelper.createGlobalString(value) as any;
+        const ctx = this.llvmHelper.getContext();
+        const zero = LLVM.ConstInt(LLVM.Int32TypeInContext(ctx), 0, 0);
+        return LLVM.ConstInBoundsGEP2(entry.charArrayType, entry.charPtrGlobal, this.toPtrArr([zero, zero]), 2);
+    }
+
+    private castIntegerLikeToString(v: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+
+        let numericValue = v.value;
+        if (v.type !== i64) {
+            numericValue = LLVM.BuildSExt(this.builder, v.value, i64, "to_i64");
+        }
+
+        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
+        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
+        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
+
+        const bufferSize = LLVM.ConstInt(i64, 64n as any, 0);
+        const bufferPtr = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([bufferSize]), 1, 'strbuf');
+
+        const sprintfType = LLVM.FunctionType(LLVM.Int32TypeInContext(ctx), this.toPtrArr([i8Ptr, i8Ptr]), 2, 1);
+        let sprintfFn = LLVM.GetNamedFunction(this.module, 'sprintf');
+        if (!sprintfFn) sprintfFn = LLVM.AddFunction(this.module, 'sprintf', sprintfType);
+        const intFormat = this.getGlobalCStringPtr("%lld");
+        LLVM.BuildCall2(this.builder, sprintfType, sprintfFn, this.toPtrArr([bufferPtr, intFormat, numericValue]), 3, '');
+
+        const strlenType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0);
+        let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
+        if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
+        const lenValue = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([bufferPtr]), 1, 'strlen');
+
+        const stringPtr = LLVM.BuildAlloca(this.builder, this.stringStructType, 'string_cast');
+        LLVM.BuildStore(this.builder, bufferPtr, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringPtr, 0, ''));
+        LLVM.BuildStore(this.builder, lenValue, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringPtr, 1, ''));
+
+        return {
+            value: LLVM.BuildLoad2(this.builder, this.stringStructType, stringPtr, 'str_cast'),
+            type: this.stringStructType,
+            address: stringPtr
+        };
+    }
 
     private emitLangItemStructs() {
         const ctx = this.llvmHelper.getContext();
@@ -92,15 +166,23 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     visitIdentifierExpr(expr: IdentifierExpr): IRValue {
-        const entry = this.currentScope.find(expr.name.lexeme);
-        if (!entry) throw new Error(`Unknown identifier: ${expr.name.lexeme}`);
-        const kind = LLVM.GetTypeKind(entry.llvmType);
-        if (kind === 11 || kind === 9) return { value: entry.ptr, type: LLVM.PointerType(entry.llvmType, 0), pointeeType: entry.llvmType };
-        return { value: LLVM.BuildLoad2(this.builder, entry.llvmType, entry.ptr, expr.name.lexeme), type: entry.llvmType, address: entry.ptr };
+        return this.resolveSymbolValue(expr.name.lexeme);
     }
 
     visitGetExpr(expr: GetExpr): IRValue {
         const ctx = this.llvmHelper.getContext();
+        if (expr.object instanceof IdentifierExpr) {
+            const namespaceAlias = expr.object.name.lexeme;
+            const namespaceMap = this.namespaceImports.get(namespaceAlias);
+            if (namespaceMap) {
+                const importedSymbolName = namespaceMap.get(expr.name.lexeme);
+                if (!importedSymbolName) {
+                    throw new Error(`Namespace '${namespaceAlias}' has no export named '${expr.name.lexeme}'.`);
+                }
+                return this.resolveSymbolValue(importedSymbolName);
+            }
+        }
+
         if (expr.object instanceof IdentifierExpr && expr.object.name.lexeme === 'clib') {
             const ft = LLVM.FunctionType(LLVM.Int32TypeInContext(ctx), this.toPtrArr([]), 0, 1);
             let f = LLVM.GetNamedFunction(this.module, expr.name.lexeme);
@@ -228,7 +310,22 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitExpressionStmt(s: ExpressionStmt) { s.expression.accept(this); }
     public ensureI64(v: IRValue): LLVMValueRef { return v.value; }
     public coerceValue(v: IRValue, t: LLVMTypeRef): IRValue { return v; }
-    visitAsExpr(e: AsExpr): IRValue { const v = e.expression.accept(this) as IRValue, t = this.llvmHelper.getLLVMType(e.type); return { value: LLVM.BuildBitCast(this.builder, v.value, t, ""), type: t }; }
+    visitAsExpr(e: AsExpr): IRValue {
+        const value = e.expression.accept(this) as IRValue;
+        const targetType = this.llvmHelper.getLLVMType(e.type);
+
+        if (e.type instanceof BasicTypeAnnotation && e.type.name.lexeme === 'string') {
+            if (value.type === this.stringStructType || value.pointeeType === this.stringStructType) {
+                return value;
+            }
+            if (this.isIntegerLikeType(value.type)) {
+                return this.castIntegerLikeToString(value);
+            }
+            throw new Error("Unsupported cast to string. Only integer-like types are currently supported.");
+        }
+
+        return { value: LLVM.BuildBitCast(this.builder, value.value, targetType, ""), type: targetType };
+    }
     visitUnaryExpr(e: UnaryExpr): IRValue { throw 0; }
     visitGroupingExpr(e: GroupingExpr): IRValue { return e.expression.accept(this) as IRValue; }
     visitAssignExpr(e: AssignExpr): IRValue { throw 0; }
