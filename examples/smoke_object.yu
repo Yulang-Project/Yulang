@@ -1,0 +1,7 @@
+import { println } from "std:io";
+
+export function main(): i32 {
+    let obj: object = { a: 1, b: 2 };
+    println("object smoke ok");
+    return 0;
+}

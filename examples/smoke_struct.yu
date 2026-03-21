@@ -1,0 +1,11 @@
+import { println } from "std:io";
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+export function main(): i32 {
+    println("struct smoke parsed");
+    return 0;
+}

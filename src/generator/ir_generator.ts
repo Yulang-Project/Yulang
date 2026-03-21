@@ -39,6 +39,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private objectStructType: LLVMTypeRef = null as any;
     private pass: 'declaration' | 'definition' = 'declaration';
     private namespaceImports: Map<string, Map<string, string>>;
+    private currentFunctionReturnType: LLVMTypeRef | null = null;
+    private currentFunctionName: string | null = null;
     public indentLevel: number = 0;
     private labelCounter: number = 0;
 
@@ -128,6 +130,157 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         };
     }
 
+    private toCStringPointer(v: IRValue): LLVMValueRef {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        if (v.type === this.stringStructType || v.pointeeType === this.stringStructType) {
+            return LLVM.BuildLoad2(this.builder, i8Ptr, LLVM.BuildStructGEP2(this.builder, this.stringStructType, v.address || v.value, 0, ""), "p");
+        }
+        return v.value;
+    }
+
+    private buildStringStructFromPtrLen(ptr: LLVMValueRef, len: LLVMValueRef): IRValue {
+        const stringPtr = LLVM.BuildAlloca(this.builder, this.stringStructType, 'string_from_ptr');
+        LLVM.BuildStore(this.builder, ptr, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringPtr, 0, ''));
+        LLVM.BuildStore(this.builder, len, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringPtr, 1, ''));
+        return {
+            value: LLVM.BuildLoad2(this.builder, this.stringStructType, stringPtr, 'str_val'),
+            type: this.stringStructType,
+            address: stringPtr
+        };
+    }
+
+    private emitClibReadFile(pathArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8 = LLVM.Int8TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(i8, 0);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+
+        const fopenType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0);
+        let fopenFn = LLVM.GetNamedFunction(this.module, 'fopen');
+        if (!fopenFn) fopenFn = LLVM.AddFunction(this.module, 'fopen', fopenType);
+
+        const fseekType = LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i64, i32]), 3, 0);
+        let fseekFn = LLVM.GetNamedFunction(this.module, 'fseek');
+        if (!fseekFn) fseekFn = LLVM.AddFunction(this.module, 'fseek', fseekType);
+
+        const ftellType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0);
+        let ftellFn = LLVM.GetNamedFunction(this.module, 'ftell');
+        if (!ftellFn) ftellFn = LLVM.AddFunction(this.module, 'ftell', ftellType);
+
+        const freadType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr, i64, i64, i8Ptr]), 4, 0);
+        let freadFn = LLVM.GetNamedFunction(this.module, 'fread');
+        if (!freadFn) freadFn = LLVM.AddFunction(this.module, 'fread', freadType);
+
+        const fcloseType = LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0);
+        let fcloseFn = LLVM.GetNamedFunction(this.module, 'fclose');
+        if (!fcloseFn) fcloseFn = LLVM.AddFunction(this.module, 'fclose', fcloseType);
+
+        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
+        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
+        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
+
+        const pathPtr = this.toCStringPointer(pathArg);
+        const readMode = this.getGlobalCStringPtr('rb');
+        const filePtr = LLVM.BuildCall2(this.builder, fopenType, fopenFn, this.toPtrArr([pathPtr, readMode]), 2, 'file_read');
+
+        LLVM.BuildCall2(this.builder, fseekType, fseekFn, this.toPtrArr([filePtr, LLVM.ConstInt(i64, 0n as any, 0), LLVM.ConstInt(i32, 2n as any, 0)]), 3, '');
+        const fileLen = LLVM.BuildCall2(this.builder, ftellType, ftellFn, this.toPtrArr([filePtr]), 1, 'file_len');
+        LLVM.BuildCall2(this.builder, fseekType, fseekFn, this.toPtrArr([filePtr, LLVM.ConstInt(i64, 0n as any, 0), LLVM.ConstInt(i32, 0n as any, 0)]), 3, '');
+
+        const allocSize = LLVM.BuildAdd(this.builder, fileLen, LLVM.ConstInt(i64, 1n as any, 0), 'alloc_size');
+        const buffer = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([allocSize]), 1, 'file_buf');
+
+        LLVM.BuildCall2(this.builder, freadType, freadFn, this.toPtrArr([buffer, LLVM.ConstInt(i64, 1n as any, 0), fileLen, filePtr]), 4, '');
+        const endPtr = LLVM.BuildInBoundsGEP2(this.builder, i8, buffer, this.toPtrArr([fileLen]), 1, 'end_ptr');
+        LLVM.BuildStore(this.builder, LLVM.ConstInt(i8, 0n as any, 0), endPtr);
+
+        LLVM.BuildCall2(this.builder, fcloseType, fcloseFn, this.toPtrArr([filePtr]), 1, '');
+        return this.buildStringStructFromPtrLen(buffer, fileLen);
+    }
+
+    private emitClibWriteFile(pathArg: IRValue, contentArg: IRValue, append: boolean): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8 = LLVM.Int8TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(i8, 0);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+
+        const fopenType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0);
+        let fopenFn = LLVM.GetNamedFunction(this.module, 'fopen');
+        if (!fopenFn) fopenFn = LLVM.AddFunction(this.module, 'fopen', fopenType);
+
+        const strlenType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0);
+        let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
+        if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
+
+        const fwriteType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr, i64, i64, i8Ptr]), 4, 0);
+        let fwriteFn = LLVM.GetNamedFunction(this.module, 'fwrite');
+        if (!fwriteFn) fwriteFn = LLVM.AddFunction(this.module, 'fwrite', fwriteType);
+
+        const fcloseType = LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0);
+        let fcloseFn = LLVM.GetNamedFunction(this.module, 'fclose');
+        if (!fcloseFn) fcloseFn = LLVM.AddFunction(this.module, 'fclose', fcloseType);
+
+        const pathPtr = this.toCStringPointer(pathArg);
+        const contentPtr = this.toCStringPointer(contentArg);
+        const modePtr = this.getGlobalCStringPtr(append ? 'ab' : 'wb');
+
+        const filePtr = LLVM.BuildCall2(this.builder, fopenType, fopenFn, this.toPtrArr([pathPtr, modePtr]), 2, 'file_write');
+        const len = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([contentPtr]), 1, 'content_len');
+        const wrote = LLVM.BuildCall2(this.builder, fwriteType, fwriteFn, this.toPtrArr([contentPtr, LLVM.ConstInt(i64, 1n as any, 0), len, filePtr]), 4, 'wrote');
+        LLVM.BuildCall2(this.builder, fcloseType, fcloseFn, this.toPtrArr([filePtr]), 1, '');
+        return { value: LLVM.BuildTrunc(this.builder, wrote, i32, 'wrote_i32'), type: i32 };
+    }
+
+    private getClibFunctionType(name: string): LLVMTypeRef {
+        const ctx = this.llvmHelper.getContext();
+        const i8 = LLVM.Int8TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(i8, 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const voidType = LLVM.VoidTypeInContext(ctx);
+
+        const table: { [key: string]: () => LLVMTypeRef } = {
+            printf: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 1),
+            sprintf: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 1),
+            puts: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+            strlen: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0),
+
+            open: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32, i32]), 3, 0),
+            read: () => LLVM.FunctionType(i64, this.toPtrArr([i32, i8Ptr, i64]), 3, 0),
+            write: () => LLVM.FunctionType(i64, this.toPtrArr([i32, i8Ptr, i64]), 3, 0),
+            close: () => LLVM.FunctionType(i32, this.toPtrArr([i32]), 1, 0),
+
+            fopen: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
+            fread: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr, i64, i64, i8Ptr]), 4, 0),
+            fwrite: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr, i64, i64, i8Ptr]), 4, 0),
+            fseek: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i64, i32]), 3, 0),
+            ftell: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0),
+            fclose: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+
+            malloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0),
+            realloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
+            free: () => LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr]), 1, 0),
+
+            access: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32]), 2, 0),
+            unlink: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+            rename: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
+            mkdir: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32]), 2, 0),
+            rmdir: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+
+            readfile: () => LLVM.FunctionType(this.stringStructType, this.toPtrArr([i8Ptr]), 1, 0),
+            writefile: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
+            appendfile: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
+        };
+
+        const factory = table[name];
+        if (factory) return factory();
+
+        return LLVM.FunctionType(i32, this.toPtrArr([]), 0, 1);
+    }
+
     private emitLangItemStructs() {
         const ctx = this.llvmHelper.getContext();
         this.objectStructType = LLVM.StructCreateNamed(ctx, LangItems.object.structName);
@@ -184,7 +337,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
 
         if (expr.object instanceof IdentifierExpr && expr.object.name.lexeme === 'clib') {
-            const ft = LLVM.FunctionType(LLVM.Int32TypeInContext(ctx), this.toPtrArr([]), 0, 1);
+            const ft = this.getClibFunctionType(expr.name.lexeme);
             let f = LLVM.GetNamedFunction(this.module, expr.name.lexeme);
             if (!f) f = LLVM.AddFunction(this.module, expr.name.lexeme, ft);
             return { value: f, type: LLVM.TypeOf(f), pointeeType: ft };
@@ -207,6 +360,24 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitCallExpr(expr: CallExpr): IRValue {
         const ctx = this.llvmHelper.getContext(), callee = expr.callee.accept(this) as IRValue;
         const i64 = LLVM.Int64TypeInContext(ctx), i8p = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        if (expr.callee instanceof GetExpr && expr.callee.object instanceof IdentifierExpr && expr.callee.object.name.lexeme === 'clib') {
+            const clibName = expr.callee.name.lexeme;
+            if (clibName === 'readfile') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitClibReadFile(pathArg);
+            }
+            if (clibName === 'writefile') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const contentArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitClibWriteFile(pathArg, contentArg, false);
+            }
+            if (clibName === 'appendfile') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const contentArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitClibWriteFile(pathArg, contentArg, true);
+            }
+        }
+
         if (callee.extra?.isMethod && callee.extra.methodName === 'push') {
             const arr = callee.address || callee.value, type = callee.pointeeType!, val = expr.args[0]!.accept(this) as IRValue;
             const lPtr = LLVM.BuildStructGEP2(this.builder, type, arr, 1, ""), cPtr = LLVM.BuildStructGEP2(this.builder, type, arr, 2, "");
@@ -277,6 +448,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         if (this.pass === 'declaration') { this.globalScope.define(n, { llvmType: ft, ptr: LLVM.AddFunction(this.module, n, ft), depth: 0 }); }
         else {
             const f = LLVM.GetNamedFunction(this.module, n); LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
+            const previousFunctionName = this.currentFunctionName;
+            const previousFunctionReturnType = this.currentFunctionReturnType;
+            this.currentFunctionName = n;
+            this.currentFunctionReturnType = rt;
             this.currentScope = new Scope(this.currentScope, 1);
             d.parameters.forEach((p, i) => {
                 const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
@@ -285,6 +460,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             d.body.statements.forEach(s => s.accept(this));
             if (LLVM.GetTypeKind(rt) === 0) LLVM.BuildRetVoid(this.builder);
             this.currentScope = this.globalScope;
+            this.currentFunctionName = previousFunctionName;
+            this.currentFunctionReturnType = previousFunctionReturnType;
         }
     }
 
@@ -296,11 +473,25 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
     visitReturnStmt(s: ReturnStmt) { 
         if (s.value) {
+            const ctx = this.llvmHelper.getContext();
             const v = (s.value.accept(this) as IRValue);
             let val = v.value;
-            // Force i32 for main return to satisfy LLC
-            const i32 = LLVM.Int32TypeInContext(this.llvmHelper.getContext());
-            val = LLVM.BuildTrunc(this.builder, v.value, i32, "");
+            const targetType = this.currentFunctionReturnType;
+            const i32 = LLVM.Int32TypeInContext(ctx);
+            const i64 = LLVM.Int64TypeInContext(ctx);
+
+            if (targetType) {
+                if (targetType === i32 && v.type !== i32 && this.isIntegerLikeType(v.type)) {
+                    val = LLVM.BuildTrunc(this.builder, v.value, i32, "ret_to_i32");
+                } else if (targetType === i64 && v.type !== i64 && this.isIntegerLikeType(v.type)) {
+                    val = LLVM.BuildSExt(this.builder, v.value, i64, "ret_to_i64");
+                } else if (v.type !== targetType) {
+                    val = LLVM.BuildBitCast(this.builder, v.value, targetType, "ret_cast");
+                }
+            } else if (this.currentFunctionName === 'main' && this.isIntegerLikeType(v.type) && v.type !== i32) {
+                val = LLVM.BuildTrunc(this.builder, v.value, i32, "main_ret_i32");
+            }
+
             LLVM.BuildRet(this.builder, val); 
         } else {
             LLVM.BuildRetVoid(this.builder); 

@@ -1,0 +1,14 @@
+import { println } from "std:io";
+
+class User {
+    public id: i32;
+
+    fun init(id: i32): i32 {
+        return id;
+    }
+}
+
+export function main(): i32 {
+    println("class smoke parsed");
+    return 0;
+}

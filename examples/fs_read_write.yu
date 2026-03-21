@@ -1,0 +1,17 @@
+import { write_text, append_text, read_text, file_exists } from "std:fs";
+import { println } from "std:io";
+
+export function main(): i32 {
+    let path: string = "/tmp/yu_fs_read_write.txt";
+    write_text(path, "hello");
+    append_text(path, "\nworld");
+
+    let content: string = read_text(path);
+    println("file content:");
+    println(content);
+
+    let existsCode: i32 = file_exists(path);
+    println("exists(0 means true):");
+    println(existsCode as string);
+    return 0;
+}
