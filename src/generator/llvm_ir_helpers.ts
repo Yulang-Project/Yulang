@@ -101,13 +101,15 @@ export class LLVMIRHelper {
         if (typeAnnotation instanceof FunctionTypeAnnotation) {
             const paramTypes = typeAnnotation.parameters.map(p => this.getLLVMType(p));
             const returnType = this.getLLVMType(typeAnnotation.returnType);
-            const paramsWithEnv = [LLVM.PointerType(LLVM.Int8TypeInContext(this.context), 0), ...paramTypes];
             
+            // The actual function pointer signature: return_type (env_ptr, args...)
+            const i8PtrType = LLVM.PointerType(LLVM.Int8TypeInContext(this.context), 0);
+            const paramsWithEnv = [i8PtrType, ...paramTypes];
             const funcType = LLVM.FunctionType(returnType, paramsWithEnv, paramsWithEnv.length, 0);
             const funcPtrType = LLVM.PointerType(funcType, 0);
 
-            // Represent closures uniformly as { func_ptr, env_ptr }
-            const structElements = [funcPtrType, LLVM.PointerType(LLVM.Int8TypeInContext(this.context), 0)];
+            // Represent closures as a struct: { code_ptr, env_ptr }
+            const structElements = [funcPtrType, i8PtrType];
             return LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
         }
 

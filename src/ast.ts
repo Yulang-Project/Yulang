@@ -237,8 +237,8 @@ export class FunctionDeclaration extends Stmt {
         public returnType: TypeAnnotation | null,
         public body: BlockStmt,
         public isExported: boolean = false,
-        public visibility: Token, // Add visibility field
-        public capturedVariables: any[] | null = null,
+        public visibility: Token = new Token(TokenType.PUBLIC, 'public', null, 0, 0),
+        public capturedVariables: Token[] | null = null, // Changed to Token[] to track captured names
         public isStatic: boolean = false
     ) { super(); }
     accept<R>(visitor: StmtVisitor<R>): R { return visitor.visitFunctionDeclaration(this); }

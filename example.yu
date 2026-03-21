@@ -1,13 +1,21 @@
 // example.yu
-import "stdio"; // This is just for show now, clib is built-in
 
 export function main(): i32 {
-    let msg: string = "Hello, TypeScript-like YuLang!";
-    clib.printf("Message: %s\n", msg.ptr);
-    clib.printf("Length: %d\n", msg.length);
+    let msg: string = "Hello from YuLang with Closures and Arrays!";
+    clib.printf("%s\n", msg.ptr);
     
-    let arr: array<i32> = [1, 2, 3];
-    // arr.length not fully implemented in IR yet, but syntax is there
+    // 1. Array with Dynamic Push
+    let arr: array<i32> = [10, 20];
+    clib.printf("Initial length: %d\n", arr.length);
+    
+    arr.push(30);
+    arr.push(40);
+    clib.printf("Final length: %d\n", arr.length);
+    
+    // 2. Access elements
+    clib.printf("arr[0] = %d\n", arr[0]);
+    clib.printf("arr[2] = %d\n", arr[2]);
+    clib.printf("arr[3] = %d\n", arr[3]);
     
     return 0;
 }
