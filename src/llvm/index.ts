@@ -79,6 +79,8 @@ export const LLVM = {
     BuildXor: lib.func('LLVMBuildXor', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMValueRef_t, 'string']),
     BuildShl: lib.func('LLVMBuildShl', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMValueRef_t, 'string']),
     BuildAShr: lib.func('LLVMBuildAShr', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMValueRef_t, 'string']),
+    BuildNeg: lib.func("LLVMBuildNeg", LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, "string"]),
+    BuildFNeg: lib.func("LLVMBuildFNeg", LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, "string"]),
     BuildLShr: lib.func('LLVMBuildLShr', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMValueRef_t, 'string']),
     
     // 指令构建 - 内存
@@ -95,6 +97,8 @@ export const LLVM = {
     BuildRetVoid: lib.func('LLVMBuildRetVoid', LLVMValueRef_t, [LLVMBuilderRef_t]),
     BuildBr: lib.func('LLVMBuildBr', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMBasicBlockRef_t]),
     BuildCondBr: lib.func('LLVMBuildCondBr', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMValueRef_t, LLVMBasicBlockRef_t, LLVMBasicBlockRef_t]),
+    BuildPhi: lib.func("LLVMBuildPhi", LLVMValueRef_t, [LLVMBuilderRef_t, LLVMTypeRef_t, "string"]),
+    AddIncoming: lib.func("LLVMAddIncoming", "void", [LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), koffi.pointer(LLVMBasicBlockRef_t), "uint32"]),
     BuildCall2: lib.func('LLVMBuildCall2', LLVMValueRef_t, [LLVMBuilderRef_t, LLVMTypeRef_t, LLVMValueRef_t, koffi.pointer(LLVMValueRef_t), 'uint32', 'string']),
 
     // 常量构建

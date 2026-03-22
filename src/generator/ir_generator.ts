@@ -43,8 +43,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private currentFunctionName: string | null = null;
     public indentLevel: number = 0;
     private labelCounter: number = 0;
+    private mangle: boolean;
 
     constructor(public platform: any, parser: Parser, mangle: boolean, path: string, debug: boolean) {
+        this.mangle = mangle;
         const context = this.llvmHelper.getContext();
         this.module = LLVM.ModuleCreateWithNameInContext(path, context);
         this.builder = LLVM.CreateBuilderInContext(context);
@@ -401,57 +403,6 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const contentArg = expr.args[1]!.accept(this) as IRValue;
                 return this.emitClibWriteFile(pathArg, contentArg, true);
             }
-            if (clibName === 'getenv') {
-                const nameArg = expr.args[0]!.accept(this) as IRValue;
-                const namePtr = this.toCStringPointer(nameArg);
-                const ft = this.getClibFunctionType('getenv');
-                let f = LLVM.GetNamedFunction(this.module, 'getenv');
-                if (!f) f = LLVM.AddFunction(this.module, 'getenv', ft);
-                const resPtr = LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr([namePtr]), 1, 'env_ptr');
-                
-                // check if null
-                const isNull = LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntEQ, LLVM.BuildPtrToInt(this.builder, resPtr, i64, ""), LLVM.ConstInt(i64, 0n as any, 0), "is_null");
-                const currentFunc = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
-                const nullBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_null");
-                const notNullBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_not_null");
-                const mergeBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_merge");
-                
-                LLVM.BuildCondBr(this.builder, isNull, nullBB, notNullBB);
-                
-                LLVM.PositionBuilderAtEnd(this.builder, nullBB);
-                const emptyStr = this.llvmHelper.createGlobalString("").stringStructGlobal;
-                const emptyStrVal = LLVM.BuildLoad2(this.builder, this.stringStructType, emptyStr, "");
-                LLVM.BuildBr(this.builder, mergeBB);
-                
-                LLVM.PositionBuilderAtEnd(this.builder, notNullBB);
-                let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
-                const strlenType = this.getClibFunctionType('strlen');
-                if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
-                const len = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([resPtr]), 1, 'env_len');
-                const strStruct = this.buildStringStructFromPtrLen(resPtr, len);
-                LLVM.BuildBr(this.builder, mergeBB);
-                
-                LLVM.PositionBuilderAtEnd(this.builder, mergeBB);
-                const phi = LLVM.BuildPhi(this.builder, this.stringStructType, "env_phi");
-                LLVM.AddIncoming(phi, [emptyStrVal, strStruct.value], [nullBB, notNullBB], 2);
-                return { value: phi, type: this.stringStructType };
-            }
-            if (clibName === 'getcwd') {
-                const ft = this.getClibFunctionType('getcwd');
-                let f = LLVM.GetNamedFunction(this.module, 'getcwd');
-                if (!f) f = LLVM.AddFunction(this.module, 'getcwd', ft);
-                const mallocType = LLVM.FunctionType(i8p, this.toPtrArr([i64]), 1, 0);
-                let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
-                if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
-                const buf = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([LLVM.ConstInt(i64, 1024n as any, 0)]), 1, 'cwd_buf');
-                const resPtr = LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr([buf, LLVM.ConstInt(i64, 1024n as any, 0)]), 2, 'getcwd_ptr');
-
-                let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
-                const strlenType = this.getClibFunctionType('strlen');
-                if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
-                const len = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([resPtr]), 1, 'cwd_len');
-                return this.buildStringStructFromPtrLen(resPtr, len);
-            }
         }
 
         if (callee.extra?.isMethod && callee.extra.methodName === 'push') {
@@ -519,14 +470,20 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     visitFunctionDeclaration(d: FunctionDeclaration) {
-        const n = d.name.lexeme, ctx = this.llvmHelper.getContext(), rt = this.llvmHelper.getLLVMType(d.returnType), pts = d.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+        let n = d.name.lexeme;
+        if (this.mangle && n !== 'main') {
+            n = `yu_${n}`;
+        }
+        const ctx = this.llvmHelper.getContext(), rt = this.llvmHelper.getLLVMType(d.returnType), pts = d.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
         const ft = LLVM.FunctionType(rt, this.toPtrArr(pts), pts.length, 0);
-        if (this.pass === 'declaration') { this.globalScope.define(n, { llvmType: ft, ptr: LLVM.AddFunction(this.module, n, ft), depth: 0 }); }
+        if (this.pass === 'declaration') { this.globalScope.define(d.name.lexeme, { llvmType: ft, ptr: LLVM.AddFunction(this.module, n, ft), depth: 0 }); }
         else {
-            const f = LLVM.GetNamedFunction(this.module, n); LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
+            const f = LLVM.GetNamedFunction(this.module, n); 
+            if (!f) throw new Error(`Function ${n} not found during definition pass`);
+            LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
             const previousFunctionName = this.currentFunctionName;
             const previousFunctionReturnType = this.currentFunctionReturnType;
-            this.currentFunctionName = n;
+            this.currentFunctionName = d.name.lexeme;
             this.currentFunctionReturnType = rt;
             this.currentScope = new Scope(this.currentScope, 1);
             d.parameters.forEach((p, i) => {
@@ -593,7 +550,18 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         return { value: LLVM.BuildBitCast(this.builder, value.value, targetType, ""), type: targetType };
     }
-    visitUnaryExpr(e: UnaryExpr): IRValue { throw 0; }
+    visitUnaryExpr(e: UnaryExpr): IRValue {
+        const v = e.right.accept(this) as IRValue;
+        if (e.operator.type === TokenType.MINUS) {
+            if (this.isIntegerLikeType(v.type)) {
+                return { value: LLVM.BuildNeg(this.builder, v.value, "neg"), type: v.type };
+            }
+            if (LLVM.GetTypeKind(v.type) === 3 || LLVM.GetTypeKind(v.type) === 2) { // Double or Float
+                return { value: LLVM.BuildFNeg(this.builder, v.value, "fneg"), type: v.type };
+            }
+        }
+        throw new Error(`Unary operator ${e.operator.lexeme} not implemented.`);
+    }
     visitGroupingExpr(e: GroupingExpr): IRValue { return e.expression.accept(this) as IRValue; }
     visitAssignExpr(e: AssignExpr): IRValue { throw 0; }
     visitThisExpr(e: ThisExpr): IRValue { throw 0; }
