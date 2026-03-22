@@ -1,0 +1,19 @@
+export function length(s: string): i64 {
+    return s.length;
+}
+
+export function compare(s1: string, s2: string): i32 {
+    return clib.strcmp(s1.ptr, s2.ptr);
+}
+
+export function compare_n(s1: string, s2: string, n: i64): i32 {
+    return clib.strncmp(s1.ptr, s2.ptr, n);
+}
+
+export function concat(s1: string, s2: string): string {
+    // This would need allocation and copying. 
+    // Since we don't have a good way to allocate a new yu string with custom size easily in yu yet,
+    // let's just provide the binding for strcat if we had a buffer.
+    // For now, let's keep it simple.
+    return "";
+}

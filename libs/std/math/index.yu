@@ -1,0 +1,31 @@
+export function abs(n: i32): i32 {
+    return clib.abs(n);
+}
+
+export function sqrt(x: f64): f64 {
+    return clib.sqrt(x);
+}
+
+export function pow(x: f64, y: f64): f64 {
+    return clib.pow(x, y);
+}
+
+export function sin(x: f64): f64 {
+    return clib.sin(x);
+}
+
+export function cos(x: f64): f64 {
+    return clib.cos(x);
+}
+
+export function tan(x: f64): f64 {
+    return clib.tan(x);
+}
+
+export function floor(x: f64): f64 {
+    return clib.floor(x);
+}
+
+export function ceil(x: f64): f64 {
+    return clib.ceil(x);
+}

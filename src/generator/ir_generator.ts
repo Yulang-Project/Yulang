@@ -240,6 +240,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const i8Ptr = LLVM.PointerType(i8, 0);
         const i32 = LLVM.Int32TypeInContext(ctx);
         const i64 = LLVM.Int64TypeInContext(ctx);
+        const f64 = LLVM.DoubleTypeInContext(ctx);
         const voidType = LLVM.VoidTypeInContext(ctx);
 
         const table: { [key: string]: () => LLVMTypeRef } = {
@@ -247,6 +248,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             sprintf: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 1),
             puts: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
             strlen: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0),
+            strcmp: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
+            strncmp: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr, i64]), 3, 0),
 
             open: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32, i32]), 3, 0),
             read: () => LLVM.FunctionType(i64, this.toPtrArr([i32, i8Ptr, i64]), 3, 0),
@@ -259,16 +262,38 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             fseek: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i64, i32]), 3, 0),
             ftell: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0),
             fclose: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+            fflush: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
 
             malloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0),
             realloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
             free: () => LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr]), 1, 0),
+
+            exit: () => LLVM.FunctionType(voidType, this.toPtrArr([i32]), 1, 0),
+            system: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+            getenv: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr]), 1, 0),
+
+            abs: () => LLVM.FunctionType(i32, this.toPtrArr([i32]), 1, 0),
+            sqrt: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+            pow: () => LLVM.FunctionType(f64, this.toPtrArr([f64, f64]), 2, 0),
+            sin: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+            cos: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+            tan: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+            floor: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+            ceil: () => LLVM.FunctionType(f64, this.toPtrArr([f64]), 1, 0),
+
+            time: () => LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0),
+            getchar: () => LLVM.FunctionType(i32, this.toPtrArr([]), 0, 0),
+            putchar: () => LLVM.FunctionType(i32, this.toPtrArr([i32]), 1, 0),
 
             access: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32]), 2, 0),
             unlink: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
             rename: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
             mkdir: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32]), 2, 0),
             rmdir: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
+            chmod: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32]), 2, 0),
+            chown: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i32, i32]), 3, 0),
+            getcwd: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
+            chdir: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
 
             readfile: () => LLVM.FunctionType(this.stringStructType, this.toPtrArr([i8Ptr]), 1, 0),
             writefile: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0),
@@ -375,6 +400,57 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const pathArg = expr.args[0]!.accept(this) as IRValue;
                 const contentArg = expr.args[1]!.accept(this) as IRValue;
                 return this.emitClibWriteFile(pathArg, contentArg, true);
+            }
+            if (clibName === 'getenv') {
+                const nameArg = expr.args[0]!.accept(this) as IRValue;
+                const namePtr = this.toCStringPointer(nameArg);
+                const ft = this.getClibFunctionType('getenv');
+                let f = LLVM.GetNamedFunction(this.module, 'getenv');
+                if (!f) f = LLVM.AddFunction(this.module, 'getenv', ft);
+                const resPtr = LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr([namePtr]), 1, 'env_ptr');
+                
+                // check if null
+                const isNull = LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntEQ, LLVM.BuildPtrToInt(this.builder, resPtr, i64, ""), LLVM.ConstInt(i64, 0n as any, 0), "is_null");
+                const currentFunc = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
+                const nullBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_null");
+                const notNullBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_not_null");
+                const mergeBB = LLVM.AppendBasicBlockInContext(ctx, currentFunc, "env_merge");
+                
+                LLVM.BuildCondBr(this.builder, isNull, nullBB, notNullBB);
+                
+                LLVM.PositionBuilderAtEnd(this.builder, nullBB);
+                const emptyStr = this.llvmHelper.createGlobalString("").stringStructGlobal;
+                const emptyStrVal = LLVM.BuildLoad2(this.builder, this.stringStructType, emptyStr, "");
+                LLVM.BuildBr(this.builder, mergeBB);
+                
+                LLVM.PositionBuilderAtEnd(this.builder, notNullBB);
+                let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
+                const strlenType = this.getClibFunctionType('strlen');
+                if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
+                const len = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([resPtr]), 1, 'env_len');
+                const strStruct = this.buildStringStructFromPtrLen(resPtr, len);
+                LLVM.BuildBr(this.builder, mergeBB);
+                
+                LLVM.PositionBuilderAtEnd(this.builder, mergeBB);
+                const phi = LLVM.BuildPhi(this.builder, this.stringStructType, "env_phi");
+                LLVM.AddIncoming(phi, [emptyStrVal, strStruct.value], [nullBB, notNullBB], 2);
+                return { value: phi, type: this.stringStructType };
+            }
+            if (clibName === 'getcwd') {
+                const ft = this.getClibFunctionType('getcwd');
+                let f = LLVM.GetNamedFunction(this.module, 'getcwd');
+                if (!f) f = LLVM.AddFunction(this.module, 'getcwd', ft);
+                const mallocType = LLVM.FunctionType(i8p, this.toPtrArr([i64]), 1, 0);
+                let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
+                if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
+                const buf = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([LLVM.ConstInt(i64, 1024n as any, 0)]), 1, 'cwd_buf');
+                const resPtr = LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr([buf, LLVM.ConstInt(i64, 1024n as any, 0)]), 2, 'getcwd_ptr');
+
+                let strlenFn = LLVM.GetNamedFunction(this.module, 'strlen');
+                const strlenType = this.getClibFunctionType('strlen');
+                if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, 'strlen', strlenType);
+                const len = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([resPtr]), 1, 'cwd_len');
+                return this.buildStringStructFromPtrLen(resPtr, len);
             }
         }
 

@@ -1,0 +1,32 @@
+import { println } from "std:io";
+import { abs, sqrt, sin } from "std:math";
+import { getenv } from "std:process";
+import { getcwd } from "std:fs";
+import { time } from "std:time";
+import { length, compare } from "std:string";
+
+export function main(): i32 {
+    println("Testing math:");
+    println("abs(-10) = " + (abs(-10) as string));
+    // println("sqrt(16.0) = " + (sqrt(16.0) as string)); // Casting f64 to string might not be supported yet
+
+    println("Testing process:");
+    let path = getenv("PATH");
+    println("PATH length: " + (length(path) as string));
+
+    println("Testing fs:");
+    let cwd = getcwd();
+    println("CWD: " + cwd);
+
+    println("Testing time:");
+    let now = time();
+    println("Current time: " + (now as string));
+
+    println("Testing string:");
+    let s1 = "hello";
+    let s2 = "world";
+    let cmp = compare(s1, s2);
+    println("compare(hello, world) = " + (cmp as string));
+
+    return 0;
+}

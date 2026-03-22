@@ -1,0 +1,11 @@
+export function exit(status: i32): void {
+    clib.exit(status);
+}
+
+export function system(command: string): i32 {
+    return clib.system(command.ptr);
+}
+
+export function getenv(name: string): string {
+    return clib.getenv(name);
+}

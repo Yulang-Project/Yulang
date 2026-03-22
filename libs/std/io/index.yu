@@ -9,3 +9,11 @@ export function println(text: string): i32 {
 export function cputs(text: string): i32 {
     return clib.puts(text.ptr);
 }
+
+export function getchar(): i32 {
+    return clib.getchar();
+}
+
+export function putchar(c: i32): i32 {
+    return clib.putchar(c);
+}

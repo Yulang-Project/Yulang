@@ -29,3 +29,19 @@ export function remove_dir(path: string): i32 {
 export function file_exists(path: string): i32 {
     return clib.access(path, 0);
 }
+
+export function chmod(path: string, mode: i32): i32 {
+    return clib.chmod(path.ptr, mode);
+}
+
+export function chown(path: string, owner: i32, group: i32): i32 {
+    return clib.chown(path.ptr, owner, group);
+}
+
+export function getcwd(): string {
+    return clib.getcwd();
+}
+
+export function chdir(path: string): i32 {
+    return clib.chdir(path.ptr);
+}

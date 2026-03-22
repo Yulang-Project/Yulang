@@ -1,0 +1,3 @@
+export function time(): i64 {
+    return clib.time(0);
+}
