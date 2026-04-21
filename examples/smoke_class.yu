@@ -3,12 +3,22 @@ import { println } from "std:io";
 class User {
     public id: i32;
 
-    fun init(id: i32): i32 {
-        return id;
+    function init(id: i32): void {
+        this.id = id;
+    }
+
+    function sayHello(): void {
+        clib.printf("User id is: %d\n", this.id);
     }
 }
 
 export function main(): i32 {
-    println("class smoke parsed");
+    println("Testing class features:");
+    let user = new User(123);
+    user.sayHello();
+    
+    user.id = 456;
+    clib.printf("Updated id is: %d\n", user.id);
+    
     return 0;
 }

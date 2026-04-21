@@ -44,6 +44,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     public indentLevel: number = 0;
     private labelCounter: number = 0;
     private mangle: boolean;
+    private classes: Map<string, ClassDeclaration> = new Map();
 
     constructor(public platform: any, parser: Parser, mangle: boolean, path: string, debug: boolean) {
         this.mangle = mangle;
@@ -378,6 +379,36 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
         const actualType = (LLVM.GetTypeKind(obj.type) === 12) ? obj.pointeeType : obj.type;
         if (actualType && LLVM.GetTypeKind(actualType) === 10) {
+            // Manual lookup based on current class being visited or stored info
+            // For now, let's use a simpler way to identify the class
+            for (const [className, classDecl] of this.classes) {
+                const structType = this.llvmHelper.getLLVMTypeByName(`struct.${className}`);
+                if (structType === actualType) {
+                    // Check properties
+                    const propIndex = classDecl.properties.findIndex(p => p.name.lexeme === expr.name.lexeme);
+                    if (propIndex !== -1) {
+                        const fieldPtr = LLVM.BuildStructGEP2(this.builder, actualType, ptr, propIndex, "");
+                        const fieldType = LLVM.StructGetTypeAtIndex(actualType, propIndex);
+                        return { 
+                            value: LLVM.BuildLoad2(this.builder, fieldType, fieldPtr, ""), 
+                            type: fieldType, 
+                            address: fieldPtr 
+                        };
+                    }
+                    // Check methods
+                    const method = classDecl.methods.find(m => m.name.lexeme === expr.name.lexeme);
+                    if (method) {
+                        return { 
+                            value: obj.value, 
+                            type: obj.type, 
+                            address: obj.address, 
+                            pointeeType: actualType, 
+                            extra: { isMethod: true, methodName: expr.name.lexeme, className } 
+                        };
+                    }
+                }
+            }
+
             if (expr.name.lexeme === 'length') return { value: LLVM.BuildLoad2(this.builder, LLVM.Int64TypeInContext(ctx), LLVM.BuildStructGEP2(this.builder, actualType, ptr, 1, ""), "l"), type: LLVM.Int64TypeInContext(ctx) };
             if (expr.name.lexeme === 'push') return { value: obj.value, type: obj.type, address: obj.address, pointeeType: actualType, extra: { isMethod: true, methodName: 'push' } };
         }
@@ -405,24 +436,36 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             }
         }
 
-        if (callee.extra?.isMethod && callee.extra.methodName === 'push') {
-            const arr = callee.address || callee.value, type = callee.pointeeType!, val = expr.args[0]!.accept(this) as IRValue;
-            const lPtr = LLVM.BuildStructGEP2(this.builder, type, arr, 1, ""), cPtr = LLVM.BuildStructGEP2(this.builder, type, arr, 2, "");
-            const l = LLVM.BuildLoad2(this.builder, i64, lPtr, ""), c = LLVM.BuildLoad2(this.builder, i64, cPtr, "");
-            const isFull = LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntEQ, l, c, "");
-            const f = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder)), rBB = LLVM.AppendBasicBlockInContext(ctx, f, "r"), pBB = LLVM.AppendBasicBlockInContext(ctx, f, "p");
-            LLVM.BuildCondBr(this.builder, isFull, rBB, pBB);
-            LLVM.PositionBuilderAtEnd(this.builder, rBB);
-            const nc = LLVM.BuildMul(this.builder, c, LLVM.ConstInt(i64, 2n as any, 0), ""), dfp = LLVM.BuildStructGEP2(this.builder, type, arr, 0, "");
-            const od = LLVM.BuildLoad2(this.builder, i8p, dfp, ""), rft = LLVM.FunctionType(i8p, this.toPtrArr([i8p, i64]), 2, 0);
-            let rf = LLVM.GetNamedFunction(this.module, "realloc"); if (!rf) rf = LLVM.AddFunction(this.module, "realloc", rft);
-            const nd = LLVM.BuildCall2(this.builder, rft, rf, this.toPtrArr([od, LLVM.BuildMul(this.builder, nc, LLVM.ConstInt(i64, 8n as any, 0), "")]), 2, "");
-            LLVM.BuildStore(this.builder, nd, dfp); LLVM.BuildStore(this.builder, nc, cPtr); LLVM.BuildBr(this.builder, pBB);
-            LLVM.PositionBuilderAtEnd(this.builder, pBB);
-            const dp = LLVM.BuildLoad2(this.builder, LLVM.PointerType(val.type, 0), LLVM.BuildStructGEP2(this.builder, type, arr, 0, ""), "");
-            LLVM.BuildStore(this.builder, val.value, LLVM.BuildInBoundsGEP2(this.builder, val.type, dp, this.toPtrArr([l]), 1, ""));
-            const nl = LLVM.BuildAdd(this.builder, l, LLVM.ConstInt(i64, 1n as any, 0), "");
-            LLVM.BuildStore(this.builder, nl, lPtr); return { value: nl, type: i64 };
+        if (callee.extra?.isMethod) {
+            const objPtr = callee.address || callee.value;
+            const methodName = callee.extra.methodName!;
+            
+            if (methodName === 'push') {
+                const type = callee.pointeeType!, val = expr.args[0]!.accept(this) as IRValue;
+                const lPtr = LLVM.BuildStructGEP2(this.builder, type, objPtr, 1, ""), cPtr = LLVM.BuildStructGEP2(this.builder, type, objPtr, 2, "");
+                const l = LLVM.BuildLoad2(this.builder, i64, lPtr, ""), c = LLVM.BuildLoad2(this.builder, i64, cPtr, "");
+                const isFull = LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntEQ, l, c, "");
+                const f = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder)), rBB = LLVM.AppendBasicBlockInContext(ctx, f, "r"), pBB = LLVM.AppendBasicBlockInContext(ctx, f, "p");
+                LLVM.BuildCondBr(this.builder, isFull, rBB, pBB);
+                LLVM.PositionBuilderAtEnd(this.builder, rBB);
+                const nc = LLVM.BuildMul(this.builder, c, LLVM.ConstInt(i64, 2n as any, 0), ""), dfp = LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, "");
+                const od = LLVM.BuildLoad2(this.builder, i8p, dfp, ""), rft = LLVM.FunctionType(i8p, this.toPtrArr([i8p, i64]), 2, 0);
+                let rf = LLVM.GetNamedFunction(this.module, "realloc"); if (!rf) rf = LLVM.AddFunction(this.module, "realloc", rft);
+                const nd = LLVM.BuildCall2(this.builder, rft, rf, this.toPtrArr([od, LLVM.BuildMul(this.builder, nc, LLVM.ConstInt(i64, 8n as any, 0), "")]), 2, "");
+                LLVM.BuildStore(this.builder, nd, dfp); LLVM.BuildStore(this.builder, nc, cPtr); LLVM.BuildBr(this.builder, pBB);
+                LLVM.PositionBuilderAtEnd(this.builder, pBB);
+                const dp = LLVM.BuildLoad2(this.builder, LLVM.PointerType(val.type, 0), LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, ""), "");
+                LLVM.BuildStore(this.builder, val.value, LLVM.BuildInBoundsGEP2(this.builder, val.type, dp, this.toPtrArr([l]), 1, ""));
+                const nl = LLVM.BuildAdd(this.builder, l, LLVM.ConstInt(i64, 1n as any, 0), "");
+                LLVM.BuildStore(this.builder, nl, lPtr); return { value: nl, type: i64 };
+            } else if (callee.extra.className) {
+                const className = callee.extra.className;
+                const mangledName = `yu_class_${className}_${methodName}`;
+                const f = LLVM.GetNamedFunction(this.module, mangledName);
+                const ft = LLVM.GetElementType(LLVM.TypeOf(f));
+                const args = [objPtr, ...expr.args.map(a => (a.accept(this) as IRValue).value)];
+                return { value: LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, ""), type: LLVM.GetReturnType(ft) };
+            }
         }
         const ft = callee.pointeeType; if (!ft) throw new Error("Missing function type");
         const args = expr.args.map(a => {
@@ -563,10 +606,47 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         throw new Error(`Unary operator ${e.operator.lexeme} not implemented.`);
     }
     visitGroupingExpr(e: GroupingExpr): IRValue { return e.expression.accept(this) as IRValue; }
-    visitAssignExpr(e: AssignExpr): IRValue { throw 0; }
-    visitThisExpr(e: ThisExpr): IRValue { throw 0; }
+    visitAssignExpr(e: AssignExpr): IRValue {
+        const target = e.target.accept(this) as IRValue;
+        const value = e.value.accept(this) as IRValue;
+        if (!target.address) throw new Error("Assignment target must have an address");
+        LLVM.BuildStore(this.builder, value.value, target.address);
+        return value;
+    }
+    visitThisExpr(e: ThisExpr): IRValue {
+        return this.resolveSymbolValue("this");
+    }
     visitObjectLiteralExpr(e: ObjectLiteralExpr): IRValue { throw 0; }
-    visitNewExpr(e: NewExpr): IRValue { throw 0; }
+    visitNewExpr(e: NewExpr): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        if (!(e.callee instanceof IdentifierExpr)) throw new Error("New expression must call a class name");
+        const className = e.callee.name.lexeme;
+        const classDecl = this.classes.get(className);
+        if (!classDecl) throw new Error(`Class ${className} not found`);
+
+        const structType = this.llvmHelper.getLLVMTypeByName(`struct.${className}`);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        
+        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
+        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
+        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
+        
+        const size = LLVM.SizeOf(structType);
+        const objPtrRaw = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([size]), 1, "new_obj_raw");
+        const objPtr = LLVM.BuildBitCast(this.builder, objPtrRaw, LLVM.PointerType(structType, 0), "new_obj");
+
+        const initMethod = classDecl.methods.find(m => m.name.lexeme === 'init');
+        if (initMethod) {
+            const mangledName = `yu_class_${className}_init`;
+            const f = LLVM.GetNamedFunction(this.module, mangledName);
+            const ft = LLVM.GetElementType(LLVM.TypeOf(f));
+            const args = [objPtr, ...e.args.map(a => (a.accept(this) as IRValue).value)];
+            LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, "");
+        }
+
+        return { value: objPtr, type: LLVM.PointerType(structType, 0), pointeeType: structType };
+    }
     visitDeleteExpr(e: DeleteExpr): IRValue { throw 0; }
     visitAddressOfExpr(e: AddressOfExpr): IRValue { throw 0; }
     visitDereferenceExpr(e: DereferenceExpr): IRValue { throw 0; }
@@ -574,7 +654,58 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitConstStmt(s: ConstStmt) {}
     visitIfStmt(s: IfStmt) {}
     visitWhileStmt(s: WhileStmt) {}
-    visitClassDeclaration(d: ClassDeclaration) {}
+    visitClassDeclaration(d: ClassDeclaration) {
+        const n = d.name.lexeme;
+        this.classes.set(n, d);
+        const ctx = this.llvmHelper.getContext();
+        const structType = this.llvmHelper.getLLVMTypeByName(`struct.${n}`);
+
+        if (this.pass === 'declaration') {
+            d.methods.forEach(m => {
+                const mn = m.name.lexeme;
+                const mangledName = `yu_class_${n}_${mn}`;
+                const rt = this.llvmHelper.getLLVMType(m.returnType);
+                const pts = [LLVM.PointerType(structType, 0), ...m.parameters.map(p => this.llvmHelper.getLLVMType(p.type))];
+                const ft = LLVM.FunctionType(rt, this.toPtrArr(pts), pts.length, 0);
+                LLVM.AddFunction(this.module, mangledName, ft);
+            });
+        } else {
+            const fieldTypes = d.properties.map(p => this.llvmHelper.getLLVMType(p.type));
+            LLVM.StructSetBody(structType, this.toPtrArr(fieldTypes), fieldTypes.length, 0);
+
+            d.methods.forEach(m => {
+                const mn = m.name.lexeme;
+                const mangledName = `yu_class_${n}_${mn}`;
+                const f = LLVM.GetNamedFunction(this.module, mangledName);
+                const ft = LLVM.GetElementType(LLVM.TypeOf(f));
+                
+                LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
+                const prevFunc = this.currentFunctionName, prevRet = this.currentFunctionReturnType;
+                this.currentFunctionName = mangledName;
+                this.currentFunctionReturnType = LLVM.GetReturnType(ft);
+                
+                const prevScope = this.currentScope;
+                this.currentScope = new Scope(this.globalScope, 1);
+                
+                const thisPtr = LLVM.BuildAlloca(this.builder, LLVM.PointerType(structType, 0), "this");
+                LLVM.BuildStore(this.builder, LLVM.GetParam(f, 0), thisPtr);
+                this.currentScope.define("this", { llvmType: LLVM.PointerType(structType, 0), ptr: thisPtr, depth: 1 });
+
+                m.parameters.forEach((p, i) => {
+                    const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
+                    LLVM.BuildStore(this.builder, LLVM.GetParam(f, i + 1), a);
+                    this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1 });
+                });
+
+                m.body.statements.forEach(s => s.accept(this));
+                if (LLVM.GetTypeKind(this.currentFunctionReturnType) === 0) LLVM.BuildRetVoid(this.builder);
+                
+                this.currentScope = prevScope;
+                this.currentFunctionName = prevFunc;
+                this.currentFunctionReturnType = prevRet;
+            });
+        }
+    }
     visitStructDeclaration(d: StructDeclaration) {}
     visitPropertyDeclaration(s: PropertyDeclaration) {}
     visitDeclareFunction(d: DeclareFunction) {}

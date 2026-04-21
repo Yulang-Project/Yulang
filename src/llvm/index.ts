@@ -137,6 +137,11 @@ export const LLVM = {
     SetDataLayout: lib.func('LLVMSetDataLayout', 'void', [LLVMModuleRef_t, 'string']),
 
     // 类型信息
+    GetStructName: lib.func("LLVMGetStructName", "string", [LLVMTypeRef_t]),
+    StructGetTypeAtIndex: lib.func("LLVMStructGetTypeAtIndex", LLVMTypeRef_t, [LLVMTypeRef_t, "uint32"]),
+    SizeOf: lib.func("LLVMSizeOf", LLVMValueRef_t, [LLVMTypeRef_t]),
+    GetStructElementTypes: lib.func("LLVMGetStructElementTypes", "void", [LLVMTypeRef_t, koffi.pointer(LLVMTypeRef_t)]),
+    CountStructElementTypes: lib.func("LLVMCountStructElementTypes", "uint32", [LLVMTypeRef_t]),
     GetTypeKind: lib.func('LLVMGetTypeKind', 'int', [LLVMTypeRef_t]),
     GetIntTypeWidth: lib.func('LLVMGetIntTypeWidth', 'uint32', [LLVMTypeRef_t]),
     TypeOf: lib.func('LLVMTypeOf', LLVMTypeRef_t, [LLVMValueRef_t]),

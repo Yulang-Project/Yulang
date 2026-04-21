@@ -276,13 +276,10 @@ export class DeclarationParser {
                 isStatic = true;
             }
 
-            if (this.parser.match(TokenType.FUN) || (this.parser.check(TokenType.IDENTIFIER) && this.parser.peekNext().type === TokenType.LPAREN)) {
-                 // Support 'fun name()' or just 'name()' in class
-                 if (this.parser.check(TokenType.IDENTIFIER)) {
-                     // method name
-                 } else {
-                     this.parser.match(TokenType.FUN);
-                 }
+            if (this.parser.match(TokenType.FUN)) {
+                if (this.parser.previous().lexeme === 'fun') {
+                    throw this.parser.error(this.parser.previous(), "Use 'function' instead of 'fun' inside classes.");
+                }
                 methods.push(this.functionDeclaration("function", false, visibility, isStatic));
             } else {
                 properties.push(this.propertyDeclaration(visibility));
