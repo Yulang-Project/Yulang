@@ -451,7 +451,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const nc = LLVM.BuildMul(this.builder, c, LLVM.ConstInt(i64, 2n as any, 0), ""), dfp = LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, "");
                 const od = LLVM.BuildLoad2(this.builder, i8p, dfp, ""), rft = LLVM.FunctionType(i8p, this.toPtrArr([i8p, i64]), 2, 0);
                 let rf = LLVM.GetNamedFunction(this.module, "realloc"); if (!rf) rf = LLVM.AddFunction(this.module, "realloc", rft);
-                const nd = LLVM.BuildCall2(this.builder, rft, rf, this.toPtrArr([od, LLVM.BuildMul(this.builder, nc, LLVM.ConstInt(i64, 8n as any, 0), "")]), 2, "");
+                const sizePerElement = LLVM.SizeOf(val.type);
+                const nd = LLVM.BuildCall2(this.builder, rft, rf, this.toPtrArr([od, LLVM.BuildMul(this.builder, nc, sizePerElement, "")]), 2, "");
                 LLVM.BuildStore(this.builder, nd, dfp); LLVM.BuildStore(this.builder, nc, cPtr); LLVM.BuildBr(this.builder, pBB);
                 LLVM.PositionBuilderAtEnd(this.builder, pBB);
                 const dp = LLVM.BuildLoad2(this.builder, LLVM.PointerType(val.type, 0), LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, ""), "");
@@ -491,10 +492,14 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const a = e.array.accept(this) as IRValue, i = e.index.accept(this) as IRValue;
         const at = (LLVM.GetTypeKind(a.type) === 12) ? a.pointeeType! : a.type;
         const ctx = this.llvmHelper.getContext();
-        const dp = LLVM.BuildLoad2(this.builder, LLVM.PointerType(LLVM.Int64TypeInContext(ctx), 0), LLVM.BuildStructGEP2(this.builder, at, a.address || a.value, 0, ""), "");
-        const et = LLVM.Int64TypeInContext(ctx);
-        const ep = LLVM.BuildInBoundsGEP2(this.builder, et, dp, this.toPtrArr([i.value]), 1, "");
-        return { value: LLVM.BuildLoad2(this.builder, et, ep, ""), type: et, address: ep };
+        
+        // Get the pointer type from the first field of the array struct
+        const ptrType = LLVM.StructGetTypeAtIndex(at, 0); // This should be ElementType*
+        const et = LLVM.GetElementType(ptrType); // This is ElementType
+        
+        const dp = LLVM.BuildLoad2(this.builder, ptrType, LLVM.BuildStructGEP2(this.builder, at, a.address || a.value, 0, ""), "data_ptr");
+        const ep = LLVM.BuildInBoundsGEP2(this.builder, et, dp, this.toPtrArr([i.value]), 1, "element_ptr");
+        return { value: LLVM.BuildLoad2(this.builder, et, ep, "element_val"), type: et, address: ep };
     }
 
     visitArrayLiteralExpr(e: ArrayLiteralExpr): IRValue {
@@ -503,7 +508,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const ap = LLVM.BuildAlloca(this.builder, st, "a"), i64 = LLVM.Int64TypeInContext(ctx), i8p = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
         const cap = BigInt(Math.max(els.length, 4)), mft = LLVM.FunctionType(i8p, this.toPtrArr([i64]), 1, 0);
         let mf = LLVM.GetNamedFunction(this.module, "malloc"); if (!mf) mf = LLVM.AddFunction(this.module, "malloc", mft);
-        const md = LLVM.BuildCall2(this.builder, mft, mf, this.toPtrArr([LLVM.ConstInt(i64, cap * 8n as any, 0)]), 1, "");
+        
+        const sizePerElement = LLVM.SizeOf(et);
+        const totalSize = LLVM.BuildMul(this.builder, LLVM.ConstInt(i64, cap as any, 0), sizePerElement, "total_size");
+        const md = LLVM.BuildCall2(this.builder, mft, mf, this.toPtrArr([totalSize]), 1, "");
+        
         const dp = LLVM.BuildBitCast(this.builder, md, LLVM.PointerType(et, 0), "");
         LLVM.BuildStore(this.builder, dp, LLVM.BuildStructGEP2(this.builder, st, ap, 0, ""));
         LLVM.BuildStore(this.builder, LLVM.ConstInt(i64, BigInt(els.length) as any, 0), LLVM.BuildStructGEP2(this.builder, st, ap, 1, ""));
@@ -652,8 +661,61 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitDereferenceExpr(e: DereferenceExpr): IRValue { throw 0; }
     visitFunctionLiteralExpr(e: FunctionLiteralExpr): IRValue { throw 0; }
     visitConstStmt(s: ConstStmt) {}
-    visitIfStmt(s: IfStmt) {}
-    visitWhileStmt(s: WhileStmt) {}
+    visitIfStmt(s: IfStmt) {
+        const ctx = this.llvmHelper.getContext();
+        const condition = (s.condition.accept(this) as IRValue).value;
+        const functionPtr = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
+
+        const thenBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "then");
+        const elseBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "else");
+        const mergeBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "if_merge");
+
+        LLVM.BuildCondBr(this.builder, condition, thenBB, elseBB);
+
+        // Then block
+        LLVM.PositionBuilderAtEnd(this.builder, thenBB);
+        s.thenBranch.accept(this);
+        if (!LLVM.GetBasicBlockTerminator(LLVM.GetInsertBlock(this.builder))) {
+            LLVM.BuildBr(this.builder, mergeBB);
+        }
+
+        // Else block
+        LLVM.PositionBuilderAtEnd(this.builder, elseBB);
+        if (s.elseBranch) {
+            s.elseBranch.accept(this);
+        }
+        if (!LLVM.GetBasicBlockTerminator(LLVM.GetInsertBlock(this.builder))) {
+            LLVM.BuildBr(this.builder, mergeBB);
+        }
+
+        // Merge block
+        LLVM.PositionBuilderAtEnd(this.builder, mergeBB);
+    }
+    visitWhileStmt(s: WhileStmt) {
+        const ctx = this.llvmHelper.getContext();
+        const functionPtr = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
+
+        const condBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "while_cond");
+        const bodyBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "while_body");
+        const endBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "while_end");
+
+        LLVM.BuildBr(this.builder, condBB);
+
+        // Condition block
+        LLVM.PositionBuilderAtEnd(this.builder, condBB);
+        const condition = (s.condition.accept(this) as IRValue).value;
+        LLVM.BuildCondBr(this.builder, condition, bodyBB, endBB);
+
+        // Body block
+        LLVM.PositionBuilderAtEnd(this.builder, bodyBB);
+        s.body.accept(this);
+        if (!LLVM.GetBasicBlockTerminator(LLVM.GetInsertBlock(this.builder))) {
+            LLVM.BuildBr(this.builder, condBB);
+        }
+
+        // End block
+        LLVM.PositionBuilderAtEnd(this.builder, endBB);
+    }
     visitClassDeclaration(d: ClassDeclaration) {
         const n = d.name.lexeme;
         this.classes.set(n, d);

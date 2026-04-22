@@ -1,0 +1,13 @@
+export function main(): i32 {
+    let arr: array<i32> = [10, 20];
+    clib.printf("Initial length: %d\n", arr.length);
+    
+    arr.push(30);
+    clib.printf("After push(30), length: %d\n", arr.length);
+    
+    clib.printf("arr[0] = %d\n", arr[0]);
+    clib.printf("arr[1] = %d\n", arr[1]);
+    clib.printf("arr[2] = %d\n", arr[2]);
+    
+    return 0;
+}
