@@ -17,7 +17,7 @@ export type IRValue = {
     type: LLVMTypeRef, 
     address?: LLVMValueRef,
     pointeeType?: LLVMTypeRef,
-    extra?: { isMethod?: boolean; methodName?: string; }
+    extra?: { isMethod?: boolean; methodName?: string; className?: string; }
 };
 
 type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; };
