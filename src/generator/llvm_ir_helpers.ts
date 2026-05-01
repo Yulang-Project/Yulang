@@ -23,6 +23,8 @@ export class LLVMIRHelper {
     private generator: any;
 
     private namedStructs: Map<string, LLVMTypeRef> = new Map();
+    private arrayStructs: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
+    private arrayElementTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
 
     constructor() {
         this.context = LLVM.ContextCreate();
@@ -189,12 +191,21 @@ export class LLVMIRHelper {
     }
 
     public ensureArrayStructDefinition(elementType: LLVMTypeRef): LLVMTypeRef {
+        const existing = this.arrayStructs.get(elementType);
+        if (existing) return existing;
+
         const structElements = [
             LLVM.PointerType(elementType, 0),
             LLVM.Int64TypeInContext(this.context),
             LLVM.Int64TypeInContext(this.context)
         ];
-        return LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
+        const structType = LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
+        this.arrayStructs.set(elementType, structType);
+        this.arrayElementTypes.set(structType, elementType);
+        return structType;
+    }
+
+    public getArrayElementType(arrayType: LLVMTypeRef): LLVMTypeRef | null {
+        return this.arrayElementTypes.get(arrayType) || null;
     }
 }
-

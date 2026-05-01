@@ -45,6 +45,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private labelCounter: number = 0;
     private mangle: boolean;
     private classes: Map<string, ClassDeclaration> = new Map();
+    private wrappedMainDeclaration: FunctionDeclaration | null = null;
 
     constructor(public platform: any, parser: Parser, mangle: boolean, path: string, debug: boolean) {
         this.mangle = mangle;
@@ -170,6 +171,86 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             type: this.stringStructType,
             address: stringPtr
         };
+    }
+
+    private buildStringArrayFromArgv(argc: LLVMValueRef, argv: LLVMValueRef): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8 = LLVM.Int8TypeInContext(ctx);
+        const i8Ptr = LLVM.PointerType(i8, 0);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const arrayType = this.llvmHelper.ensureArrayStructDefinition(this.stringStructType);
+        const arrayPtr = LLVM.BuildAlloca(this.builder, arrayType, "args");
+
+        const argc64 = LLVM.BuildSExt(this.builder, argc, i64, "argc64");
+        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
+        let mallocFn = LLVM.GetNamedFunction(this.module, "malloc");
+        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, "malloc", mallocType);
+        const byteSize = LLVM.BuildMul(this.builder, argc64, LLVM.SizeOf(this.stringStructType), "args_bytes");
+        const rawData = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([byteSize]), 1, "args_raw");
+        const dataPtr = LLVM.BuildBitCast(this.builder, rawData, LLVM.PointerType(this.stringStructType, 0), "args_data");
+        LLVM.BuildStore(this.builder, dataPtr, LLVM.BuildStructGEP2(this.builder, arrayType, arrayPtr, 0, ""));
+        LLVM.BuildStore(this.builder, argc64, LLVM.BuildStructGEP2(this.builder, arrayType, arrayPtr, 1, ""));
+        LLVM.BuildStore(this.builder, argc64, LLVM.BuildStructGEP2(this.builder, arrayType, arrayPtr, 2, ""));
+
+        const strlenType = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr]), 1, 0);
+        let strlenFn = LLVM.GetNamedFunction(this.module, "strlen");
+        if (!strlenFn) strlenFn = LLVM.AddFunction(this.module, "strlen", strlenType);
+
+        const functionPtr = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
+        const condBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "argv_cond");
+        const bodyBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "argv_body");
+        const endBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "argv_end");
+        const indexPtr = LLVM.BuildAlloca(this.builder, i32, "argv_i");
+        LLVM.BuildStore(this.builder, LLVM.ConstInt(i32, 0n as any, 0), indexPtr);
+        LLVM.BuildBr(this.builder, condBB);
+
+        LLVM.PositionBuilderAtEnd(this.builder, condBB);
+        const index = LLVM.BuildLoad2(this.builder, i32, indexPtr, "argv_i_val");
+        const keepGoing = LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntSLT, index, argc, "argv_has_next");
+        LLVM.BuildCondBr(this.builder, keepGoing, bodyBB, endBB);
+
+        LLVM.PositionBuilderAtEnd(this.builder, bodyBB);
+        const argvSlot = LLVM.BuildInBoundsGEP2(this.builder, i8Ptr, argv, this.toPtrArr([index]), 1, "argv_slot");
+        const rawArg = LLVM.BuildLoad2(this.builder, i8Ptr, argvSlot, "argv_raw");
+        const argLen = LLVM.BuildCall2(this.builder, strlenType, strlenFn, this.toPtrArr([rawArg]), 1, "argv_len");
+        const index64 = LLVM.BuildSExt(this.builder, index, i64, "argv_i64");
+        const stringSlot = LLVM.BuildInBoundsGEP2(this.builder, this.stringStructType, dataPtr, this.toPtrArr([index64]), 1, "arg_slot");
+        LLVM.BuildStore(this.builder, rawArg, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringSlot, 0, ""));
+        LLVM.BuildStore(this.builder, argLen, LLVM.BuildStructGEP2(this.builder, this.stringStructType, stringSlot, 1, ""));
+        const nextIndex = LLVM.BuildAdd(this.builder, index, LLVM.ConstInt(i32, 1n as any, 0), "argv_i_next");
+        LLVM.BuildStore(this.builder, nextIndex, indexPtr);
+        LLVM.BuildBr(this.builder, condBB);
+
+        LLVM.PositionBuilderAtEnd(this.builder, endBB);
+        return {
+            value: LLVM.BuildLoad2(this.builder, arrayType, arrayPtr, "args_value"),
+            type: arrayType,
+            address: arrayPtr,
+            pointeeType: arrayType
+        };
+    }
+
+    private emitMainWrapper(d: FunctionDeclaration) {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const argvType = LLVM.PointerType(i8Ptr, 0);
+        const mainType = LLVM.FunctionType(i32, this.toPtrArr([i32, argvType]), 2, 0);
+        const mainFn = LLVM.AddFunction(this.module, "main", mainType);
+        LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, mainFn, "entry"));
+
+        const argc = LLVM.GetParam(mainFn, 0);
+        const argv = LLVM.GetParam(mainFn, 1);
+        const argsArray = this.buildStringArrayFromArgv(argc, argv);
+        const yuMain = LLVM.GetNamedFunction(this.module, "yu_main");
+        const yuMainType = this.llvmHelper.getLLVMType(d.returnType);
+        const paramTypes = d.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
+        const yuMainFunctionType = LLVM.FunctionType(yuMainType, this.toPtrArr(paramTypes), paramTypes.length, 0);
+        const callArgs = d.parameters.length === 2 ? [argc, argsArray.value] : [argsArray.value];
+        const result = LLVM.BuildCall2(this.builder, yuMainFunctionType, yuMain, this.toPtrArr(callArgs), callArgs.length, "yu_main_result");
+        const returnValue = yuMainType === i32 ? result : this.coerceToType({ value: result, type: yuMainType }, i32, "main_ret");
+        LLVM.BuildRet(this.builder, returnValue);
     }
 
     private emitClibReadFile(pathArg: IRValue): IRValue {
@@ -328,6 +409,30 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return LLVM.FunctionType(i32, this.toPtrArr([]), 0, 1);
     }
 
+    private shouldWrapMain(d: FunctionDeclaration): boolean {
+        return this.mangle && d.name.lexeme === 'main' && d.parameters.length > 0;
+    }
+
+    private isStringType(type: TypeAnnotation | null): boolean {
+        return type instanceof BasicTypeAnnotation && type.name.lexeme === 'string';
+    }
+
+    private isStringArrayType(type: TypeAnnotation | null): boolean {
+        return type instanceof ArrayTypeAnnotation && this.isStringType(type.elementType);
+    }
+
+    private validateWrappedMainSignature(d: FunctionDeclaration) {
+        const valid = (d.parameters.length === 1 && this.isStringArrayType(d.parameters[0]?.type ?? null))
+            || (d.parameters.length === 2
+                && d.parameters[0]?.type instanceof BasicTypeAnnotation
+                && d.parameters[0].type.name.lexeme === 'i32'
+                && this.isStringArrayType(d.parameters[1]?.type ?? null));
+
+        if (!valid) {
+            throw new Error("main with parameters must be main(args: array<string>) or main(argc: i32, args: array<string>).");
+        }
+    }
+
     private getClassMethodType(className: string, method: FunctionDeclaration): LLVMTypeRef {
         const structType = this.llvmHelper.getLLVMTypeByName(`struct.${className}`);
         const rt = this.llvmHelper.getLLVMType(method.returnType);
@@ -350,12 +455,15 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         ['declaration', 'definition'].forEach(p => {
             this.pass = p as any;
             nodes.forEach(n => { if (n instanceof Stmt) n.accept(this); });
-            if (p === 'declaration' && !LLVM.GetNamedFunction(this.module, "main")) {
+            if (p === 'declaration' && !LLVM.GetNamedFunction(this.module, "main") && !this.wrappedMainDeclaration) {
                 const i32 = LLVM.Int32TypeInContext(this.llvmHelper.getContext());
                 const main = LLVM.AddFunction(this.module, "main", LLVM.FunctionType(i32, this.toPtrArr([]), 0, 0));
                 LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(this.llvmHelper.getContext(), main, "entry"));
             }
         });
+        if (this.wrappedMainDeclaration) {
+            this.emitMainWrapper(this.wrappedMainDeclaration);
+        }
         return LLVM.PrintModuleToString(this.module);
     }
 
@@ -525,13 +633,16 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const a = e.array.accept(this) as IRValue, i = e.index.accept(this) as IRValue;
         const at = (LLVM.GetTypeKind(a.type) === 12) ? a.pointeeType! : a.type;
         const ctx = this.llvmHelper.getContext();
+        const i64 = LLVM.Int64TypeInContext(ctx);
         
         // Get the pointer type from the first field of the array struct
         const ptrType = LLVM.StructGetTypeAtIndex(at, 0); // This should be ElementType*
-        const et = LLVM.GetElementType(ptrType); // This is ElementType
+        const et = this.llvmHelper.getArrayElementType(at);
+        if (!et) throw new Error("Cannot determine array element type.");
         
         const dp = LLVM.BuildLoad2(this.builder, ptrType, LLVM.BuildStructGEP2(this.builder, at, a.address || a.value, 0, ""), "data_ptr");
-        const ep = LLVM.BuildInBoundsGEP2(this.builder, et, dp, this.toPtrArr([i.value]), 1, "element_ptr");
+        const index = this.coerceToType(i, i64, "index_i64");
+        const ep = LLVM.BuildInBoundsGEP2(this.builder, et, dp, this.toPtrArr([index]), 1, "element_ptr");
         return { value: LLVM.BuildLoad2(this.builder, et, ep, "element_val"), type: et, address: ep };
     }
 
@@ -556,7 +667,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
     visitFunctionDeclaration(d: FunctionDeclaration) {
         let n = d.name.lexeme;
-        if (this.mangle && n !== 'main') {
+        if (this.shouldWrapMain(d)) {
+            this.validateWrappedMainSignature(d);
+            n = 'yu_main';
+            this.wrappedMainDeclaration = d;
+        } else if (this.mangle && n !== 'main') {
             n = `yu_${n}`;
         }
         const ctx = this.llvmHelper.getContext(), rt = this.llvmHelper.getLLVMType(d.returnType), pts = d.parameters.map(p => this.llvmHelper.getLLVMType(p.type));

@@ -1,0 +1,10 @@
+import { println } from "std:io";
+
+export function main(args: array<string>): i32 {
+    println("args smoke ok");
+    clib.printf("argc = %d\n", args.length);
+    clib.printf("argv0 = %s\n", args[0].ptr);
+    clib.printf("argv1 = %s\n", args[1].ptr);
+    clib.printf("argv2 = %s\n", args[2].ptr);
+    return 0;
+}
