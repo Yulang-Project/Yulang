@@ -14,6 +14,9 @@ export function resolveLangItemType(typeName: string): string | false {
     if (typeName === LangItems.string.typeName) {
         return LangItems.string.structName;
     }
+    if (typeName === LangItems.object.typeName) {
+        return LangItems.object.structName;
+    }
     // Future lang items like 'array' could be handled here
     return false;
 }

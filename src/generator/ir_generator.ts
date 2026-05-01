@@ -20,7 +20,7 @@ export type IRValue = {
     extra?: { isMethod?: boolean; methodName?: string; className?: string; }
 };
 
-type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; };
+type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; };
 
 class Scope {
     public symbols: Map<string, SymbolEntry> = new Map();
@@ -66,7 +66,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return {
             value: LLVM.BuildLoad2(this.builder, entry.llvmType, entry.ptr, name),
             type: entry.llvmType,
-            address: entry.ptr
+            address: entry.ptr,
+            pointeeType: entry.pointeeType
         };
     }
 
@@ -85,6 +86,24 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             || type === LLVM.Int16TypeInContext(ctx)
             || type === LLVM.Int32TypeInContext(ctx)
             || type === LLVM.Int64TypeInContext(ctx);
+    }
+
+    private coerceToType(v: IRValue, targetType: LLVMTypeRef, name: string = ""): LLVMValueRef {
+        if (v.type === targetType) return v.value;
+
+        if (this.isIntegerLikeType(v.type) && this.isIntegerLikeType(targetType)) {
+            const sourceWidth = LLVM.GetIntTypeWidth(v.type);
+            const targetWidth = LLVM.GetIntTypeWidth(targetType);
+            if (sourceWidth > targetWidth) return LLVM.BuildTrunc(this.builder, v.value, targetType, name);
+            if (sourceWidth < targetWidth) return LLVM.BuildSExt(this.builder, v.value, targetType, name);
+            return v.value;
+        }
+
+        if (LLVM.GetTypeKind(v.type) === 12 && LLVM.GetTypeKind(targetType) === 12) {
+            return LLVM.BuildPointerCast(this.builder, v.value, targetType, name);
+        }
+
+        return LLVM.BuildBitCast(this.builder, v.value, targetType, name);
     }
 
     private getGlobalCStringPtr(value: string): LLVMValueRef {
@@ -309,10 +328,17 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return LLVM.FunctionType(i32, this.toPtrArr([]), 0, 1);
     }
 
+    private getClassMethodType(className: string, method: FunctionDeclaration): LLVMTypeRef {
+        const structType = this.llvmHelper.getLLVMTypeByName(`struct.${className}`);
+        const rt = this.llvmHelper.getLLVMType(method.returnType);
+        const pts = [LLVM.PointerType(structType, 0), ...method.parameters.map(p => this.llvmHelper.getLLVMType(p.type))];
+        return LLVM.FunctionType(rt, this.toPtrArr(pts), pts.length, 0);
+    }
+
     private emitLangItemStructs() {
         const ctx = this.llvmHelper.getContext();
         this.objectStructType = LLVM.StructCreateNamed(ctx, LangItems.object.structName);
-        LLVM.StructSetBody(this.objectStructType, this.toPtrArr([]), 0, 0);
+        LLVM.StructSetBody(this.objectStructType, this.toPtrArr([LLVM.Int8TypeInContext(ctx)]), 1, 0);
         const strEl = [LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0), LLVM.Int64TypeInContext(ctx)];
         this.stringStructType = LLVM.StructCreateNamed(ctx, LangItems.string.structName);
         LLVM.StructSetBody(this.stringStructType, this.toPtrArr(strEl), 2, 0);
@@ -371,7 +397,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             return { value: f, type: LLVM.TypeOf(f), pointeeType: ft };
         }
         const obj = expr.object.accept(this) as IRValue;
-        const ptr = obj.address || obj.value;
+        const ptr = LLVM.GetTypeKind(obj.type) === 12 ? obj.value : (obj.address || obj.value);
         const isStr = (obj.type === this.stringStructType || obj.pointeeType === this.stringStructType);
         if (isStr) {
             if (expr.name.lexeme === 'length') return { value: LLVM.BuildLoad2(this.builder, LLVM.Int64TypeInContext(ctx), LLVM.BuildStructGEP2(this.builder, this.stringStructType, ptr, 1, ""), "l"), type: LLVM.Int64TypeInContext(ctx) };
@@ -437,7 +463,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
 
         if (callee.extra?.isMethod) {
-            const objPtr = callee.address || callee.value;
+            const objPtr = LLVM.GetTypeKind(callee.type) === 12 ? callee.value : (callee.address || callee.value);
             const methodName = callee.extra.methodName!;
             
             if (methodName === 'push') {
@@ -461,10 +487,17 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 LLVM.BuildStore(this.builder, nl, lPtr); return { value: nl, type: i64 };
             } else if (callee.extra.className) {
                 const className = callee.extra.className;
+                const classDecl = this.classes.get(className);
+                const method = classDecl?.methods.find(m => m.name.lexeme === methodName);
+                if (!method) throw new Error(`Method ${className}.${methodName} not found`);
                 const mangledName = `yu_class_${className}_${methodName}`;
                 const f = LLVM.GetNamedFunction(this.module, mangledName);
-                const ft = LLVM.GetElementType(LLVM.TypeOf(f));
-                const args = [objPtr, ...expr.args.map(a => (a.accept(this) as IRValue).value)];
+                const ft = this.getClassMethodType(className, method);
+                const args = [objPtr, ...expr.args.map((a, i) => {
+                    const arg = a.accept(this) as IRValue;
+                    const paramType = this.llvmHelper.getLLVMType(method.parameters[i]?.type ?? null);
+                    return this.coerceToType(arg, paramType, "arg_cast");
+                })];
                 return { value: LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, ""), type: LLVM.GetReturnType(ft) };
             }
         }
@@ -551,9 +584,12 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
 
     visitLetStmt(s: LetStmt) {
-        const t = this.llvmHelper.getLLVMType(s.type), p = LLVM.BuildAlloca(this.builder, t, s.name.lexeme);
-        this.currentScope.define(s.name.lexeme, { llvmType: t, ptr: p, depth: this.currentScope.depth });
-        if (s.initializer) LLVM.BuildStore(this.builder, (s.initializer.accept(this) as IRValue).value, p);
+        const initializer = s.initializer ? (s.initializer.accept(this) as IRValue) : null;
+        const t = s.type ? this.llvmHelper.getLLVMType(s.type) : initializer?.type;
+        if (!t) throw new Error(`Variable '${s.name.lexeme}' requires a type annotation or initializer.`);
+        const p = LLVM.BuildAlloca(this.builder, t, s.name.lexeme);
+        this.currentScope.define(s.name.lexeme, { llvmType: t, ptr: p, depth: this.currentScope.depth, pointeeType: initializer?.pointeeType });
+        if (initializer) LLVM.BuildStore(this.builder, this.coerceToType(initializer, t, "init_cast"), p);
     }
 
     visitReturnStmt(s: ReturnStmt) { 
@@ -571,7 +607,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 } else if (targetType === i64 && v.type !== i64 && this.isIntegerLikeType(v.type)) {
                     val = LLVM.BuildSExt(this.builder, v.value, i64, "ret_to_i64");
                 } else if (v.type !== targetType) {
-                    val = LLVM.BuildBitCast(this.builder, v.value, targetType, "ret_cast");
+                    val = this.coerceToType(v, targetType, "ret_cast");
                 }
             } else if (this.currentFunctionName === 'main' && this.isIntegerLikeType(v.type) && v.type !== i32) {
                 val = LLVM.BuildTrunc(this.builder, v.value, i32, "main_ret_i32");
@@ -619,13 +655,23 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const target = e.target.accept(this) as IRValue;
         const value = e.value.accept(this) as IRValue;
         if (!target.address) throw new Error("Assignment target must have an address");
-        LLVM.BuildStore(this.builder, value.value, target.address);
+        LLVM.BuildStore(this.builder, this.coerceToType(value, target.type, "assign_cast"), target.address);
         return value;
     }
     visitThisExpr(e: ThisExpr): IRValue {
         return this.resolveSymbolValue("this");
     }
-    visitObjectLiteralExpr(e: ObjectLiteralExpr): IRValue { throw 0; }
+    visitObjectLiteralExpr(e: ObjectLiteralExpr): IRValue {
+        for (const value of e.properties.values()) {
+            value.accept(this);
+        }
+
+        const ctx = this.llvmHelper.getContext();
+        const value = LLVM.ConstNamedStruct(this.objectStructType, this.toPtrArr([
+            LLVM.ConstInt(LLVM.Int8TypeInContext(ctx), 0n as any, 0)
+        ]), 1);
+        return { value, type: this.objectStructType };
+    }
     visitNewExpr(e: NewExpr): IRValue {
         const ctx = this.llvmHelper.getContext();
         if (!(e.callee instanceof IdentifierExpr)) throw new Error("New expression must call a class name");
@@ -649,8 +695,12 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         if (initMethod) {
             const mangledName = `yu_class_${className}_init`;
             const f = LLVM.GetNamedFunction(this.module, mangledName);
-            const ft = LLVM.GetElementType(LLVM.TypeOf(f));
-            const args = [objPtr, ...e.args.map(a => (a.accept(this) as IRValue).value)];
+            const ft = this.getClassMethodType(className, initMethod);
+            const args = [objPtr, ...e.args.map((a, i) => {
+                const arg = a.accept(this) as IRValue;
+                const paramType = this.llvmHelper.getLLVMType(initMethod.parameters[i]?.type ?? null);
+                return this.coerceToType(arg, paramType, "ctor_arg_cast");
+            })];
             LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, "");
         }
 
@@ -723,23 +773,21 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const structType = this.llvmHelper.getLLVMTypeByName(`struct.${n}`);
 
         if (this.pass === 'declaration') {
-            d.methods.forEach(m => {
-                const mn = m.name.lexeme;
-                const mangledName = `yu_class_${n}_${mn}`;
-                const rt = this.llvmHelper.getLLVMType(m.returnType);
-                const pts = [LLVM.PointerType(structType, 0), ...m.parameters.map(p => this.llvmHelper.getLLVMType(p.type))];
-                const ft = LLVM.FunctionType(rt, this.toPtrArr(pts), pts.length, 0);
-                LLVM.AddFunction(this.module, mangledName, ft);
-            });
-        } else {
             const fieldTypes = d.properties.map(p => this.llvmHelper.getLLVMType(p.type));
             LLVM.StructSetBody(structType, this.toPtrArr(fieldTypes), fieldTypes.length, 0);
 
             d.methods.forEach(m => {
                 const mn = m.name.lexeme;
                 const mangledName = `yu_class_${n}_${mn}`;
+                const ft = this.getClassMethodType(n, m);
+                LLVM.AddFunction(this.module, mangledName, ft);
+            });
+        } else {
+            d.methods.forEach(m => {
+                const mn = m.name.lexeme;
+                const mangledName = `yu_class_${n}_${mn}`;
                 const f = LLVM.GetNamedFunction(this.module, mangledName);
-                const ft = LLVM.GetElementType(LLVM.TypeOf(f));
+                const ft = this.getClassMethodType(n, m);
                 
                 LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
                 const prevFunc = this.currentFunctionName, prevRet = this.currentFunctionReturnType;
@@ -751,7 +799,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 
                 const thisPtr = LLVM.BuildAlloca(this.builder, LLVM.PointerType(structType, 0), "this");
                 LLVM.BuildStore(this.builder, LLVM.GetParam(f, 0), thisPtr);
-                this.currentScope.define("this", { llvmType: LLVM.PointerType(structType, 0), ptr: thisPtr, depth: 1 });
+                this.currentScope.define("this", { llvmType: LLVM.PointerType(structType, 0), ptr: thisPtr, depth: 1, pointeeType: structType });
 
                 m.parameters.forEach((p, i) => {
                     const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
