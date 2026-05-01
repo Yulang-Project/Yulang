@@ -18,3 +18,4 @@ yarn.lock
 *.out
 test/
 llvm/
+.codex
