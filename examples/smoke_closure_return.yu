@@ -1,0 +1,14 @@
+function makeAdder(base: i32): (i32) => i32 {
+    return function(x: i32): i32 {
+        return base + x;
+    };
+}
+
+export function main(): i32 {
+    let add5: (i32) => i32 = makeAdder(5);
+    let add20: (i32) => i32 = makeAdder(20);
+
+    clib.printf("add5(37) = %d\n", add5(37));
+    clib.printf("add20(22) = %d\n", add20(22));
+    return 0;
+}

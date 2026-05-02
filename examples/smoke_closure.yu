@@ -1,0 +1,14 @@
+export function main(): i32 {
+    let base: i32 = 10;
+    let add: (i32) => i32 = function(x: i32): i32 {
+        return base + x;
+    };
+
+    let arrowAdd: (i32) => i32 = (x: i32): i32 => base + x;
+
+    clib.printf("closure first: %d\n", add(32));
+    base = 20;
+    clib.printf("closure second: %d\n", add(22));
+    clib.printf("arrow closure: %d\n", arrowAdd(22));
+    return 0;
+}

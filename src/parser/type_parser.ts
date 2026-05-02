@@ -14,6 +14,10 @@ export class TypeParser {
     }
 
     public parse(): TypeAnnotation {
+        if (this.parser.check(TokenType.LPAREN) && this.isArrowFunctionTypeStart()) {
+            return this.arrowFunctionType();
+        }
+
         if (this.parser.match(TokenType.ARRAY)) {
             this.parser.consume(TokenType.LT, "Expect '<' after 'array'.");
             const elementType = this.parse();
@@ -66,5 +70,36 @@ export class TypeParser {
         }
 
         throw this.parser.error(this.parser.peek(), "Expect type name.");
+    }
+
+    private isArrowFunctionTypeStart(): boolean {
+        let depth = 0;
+        for (let i = this.parser.current; i < this.parser.tokens.length; i++) {
+            const token = this.parser.tokens[i]!;
+            if (token.type === TokenType.LPAREN) depth++;
+            if (token.type === TokenType.RPAREN) {
+                depth--;
+                if (depth === 0) return this.parser.tokens[i + 1]?.type === TokenType.ARROW;
+            }
+        }
+        return false;
+    }
+
+    private arrowFunctionType(): FunctionTypeAnnotation {
+        this.parser.consume(TokenType.LPAREN, "Expect '(' before function type parameters.");
+        const params: TypeAnnotation[] = [];
+        if (!this.parser.check(TokenType.RPAREN)) {
+            do {
+                if (this.parser.check(TokenType.IDENTIFIER) && this.parser.tokens[this.parser.current + 1]?.type === TokenType.COLON) {
+                    this.parser.advance();
+                    this.parser.consume(TokenType.COLON, "Expect ':' after function type parameter name.");
+                }
+                params.push(this.parse());
+            } while (this.parser.match(TokenType.COMMA));
+        }
+        this.parser.consume(TokenType.RPAREN, "Expect ')' after function type parameters.");
+        this.parser.consume(TokenType.ARROW, "Expect '=>' in function type.");
+        const returnType = this.parse();
+        return new FunctionTypeAnnotation(params, returnType);
     }
 }

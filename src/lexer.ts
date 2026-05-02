@@ -230,7 +230,11 @@ export class Lexer {
                 this.addToken(TokenType.MINUS);
                 break;
             case '=':
-                this.addToken(this.match('=') ? TokenType.EQ_EQ : TokenType.EQ);
+                if (this.match('>')) {
+                    this.addToken(TokenType.ARROW);
+                } else {
+                    this.addToken(this.match('=') ? TokenType.EQ_EQ : TokenType.EQ);
+                }
                 break;
             case '!':
                 this.addToken(this.match('=') ? TokenType.BANG_EQ : TokenType.BANG);

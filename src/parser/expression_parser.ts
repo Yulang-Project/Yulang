@@ -7,7 +7,9 @@ import {
     FunctionLiteralExpr,
     Parameter,
     ArrayLiteralExpr,
-    IndexExpr
+    IndexExpr,
+    ReturnStmt,
+    BlockStmt
 } from '../ast.js';
 import { Parser } from './index.js'; // Import Parser to use it as a type
 
@@ -247,6 +249,63 @@ export class ExpressionParser {
         return args;
     }
 
+    private isArrowFunctionStart(): boolean {
+        if (!this.parser.check(TokenType.LPAREN)) return false;
+
+        let depth = 0;
+        for (let i = this.parser.current; i < this.parser.tokens.length; i++) {
+            const token = this.parser.tokens[i]!;
+            if (token.type === TokenType.LPAREN) depth++;
+            if (token.type === TokenType.RPAREN) {
+                depth--;
+                if (depth === 0) {
+                    let next = i + 1;
+                    if (this.parser.tokens[next]?.type === TokenType.COLON) {
+                        next++;
+                        while (next < this.parser.tokens.length && this.parser.tokens[next]?.type !== TokenType.ARROW) {
+                            const t = this.parser.tokens[next]!;
+                            if (t.type === TokenType.LBRACE || t.type === TokenType.SEMICOLON || t.type === TokenType.EOF) return false;
+                            next++;
+                        }
+                    }
+                    return this.parser.tokens[next]?.type === TokenType.ARROW;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private arrowFunction(): FunctionLiteralExpr {
+        this.parser.consume(TokenType.LPAREN, "Expect '(' before arrow function parameters.");
+        const parameters: Parameter[] = [];
+        if (!this.parser.check(TokenType.RPAREN)) {
+            do {
+                const paramName = this.parser.consume(TokenType.IDENTIFIER, "Expect parameter name.");
+                let paramType: TypeAnnotation | null = null;
+                if (this.parser.match(TokenType.COLON)) {
+                    paramType = this.parser.typeAnnotation();
+                }
+                parameters.push(new Parameter(paramName, paramType));
+            } while (this.parser.match(TokenType.COMMA));
+        }
+        this.parser.consume(TokenType.RPAREN, "Expect ')' after arrow function parameters.");
+
+        let returnType: TypeAnnotation | null = null;
+        if (this.parser.match(TokenType.COLON)) {
+            returnType = this.parser.typeAnnotation();
+        }
+
+        this.parser.consume(TokenType.ARROW, "Expect '=>' after arrow function parameters.");
+        if (this.parser.match(TokenType.LBRACE)) {
+            return new FunctionLiteralExpr(parameters, returnType, this.parser.block());
+        }
+
+        const value = this.parse();
+        const returnToken = new Token(TokenType.RETURN, 'return', null, 0, 0);
+        return new FunctionLiteralExpr(parameters, returnType, new BlockStmt([new ReturnStmt(returnToken, value)]));
+    }
+
     // primary        → NUMBER | STRING_LITERAL | IDENTIFIER | "(" expression ")" | CHAR_LITERAL | OBJECT_LITERAL | TRUE | FALSE | ARRAY_LITERAL;
     private primary(): Expr {
         if (this.parser.match(TokenType.NUMBER, TokenType.STRING_LITERAL, TokenType.CHAR_LITERAL)) {
@@ -269,6 +328,11 @@ export class ExpressionParser {
         }
 
         if (this.parser.match(TokenType.LPAREN)) {
+            this.parser.current--;
+            if (this.isArrowFunctionStart()) {
+                return this.arrowFunction();
+            }
+            this.parser.advance();
             const expr = this.parse();
             this.parser.consume(TokenType.RPAREN, "Expect ')' after expression.");
             return new GroupingExpr(expr);

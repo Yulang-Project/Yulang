@@ -57,6 +57,7 @@ export enum TokenType {
     STAR = 'STAR',
     SLASH = 'SLASH',
     EQ_EQ = 'EQ_EQ', // ==
+    ARROW = 'ARROW', // =>
     BANG_EQ = 'BANG_EQ', // !=
     LT = 'LT', // <
     GT = 'GT', // >
@@ -152,4 +153,3 @@ Object.assign(keywords, {
     'false': TokenType.FALSE,
     'extends': TokenType.EXTENDS,
 });
-

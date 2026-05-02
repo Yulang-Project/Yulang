@@ -17,10 +17,11 @@ export type IRValue = {
     type: LLVMTypeRef, 
     address?: LLVMValueRef,
     pointeeType?: LLVMTypeRef,
-    extra?: { isMethod?: boolean; methodName?: string; className?: string; }
+    extra?: { isMethod?: boolean; methodName?: string; className?: string; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; }
 };
 
-type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; };
+type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; };
+type CaptureEntry = { name: string; symbol: SymbolEntry; };
 
 class Scope {
     public symbols: Map<string, SymbolEntry> = new Map();
@@ -46,6 +47,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private mangle: boolean;
     private classes: Map<string, ClassDeclaration> = new Map();
     private wrappedMainDeclaration: FunctionDeclaration | null = null;
+    private currentClosureEnvType: LLVMTypeRef | null = null;
+    private currentClosureEnvPtr: LLVMValueRef | null = null;
+    private currentClosureCaptures: CaptureEntry[] = [];
 
     constructor(public platform: any, parser: Parser, mangle: boolean, path: string, debug: boolean) {
         this.mangle = mangle;
@@ -62,14 +66,33 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         if (!entry) throw new Error(`Unknown identifier: ${name}`);
         const kind = LLVM.GetTypeKind(entry.llvmType);
         if (kind === 11 || kind === 9) {
-            return { value: entry.ptr, type: LLVM.PointerType(entry.llvmType, 0), pointeeType: entry.llvmType };
+            return {
+                value: entry.ptr,
+                type: LLVM.PointerType(entry.llvmType, 0),
+                pointeeType: entry.llvmType,
+                extra: entry.functionParamTypes ? {
+                    functionParamTypes: entry.functionParamTypes,
+                    functionReturnType: entry.functionReturnType
+                } : undefined
+            };
         }
         return {
             value: LLVM.BuildLoad2(this.builder, entry.llvmType, entry.ptr, name),
             type: entry.llvmType,
             address: entry.ptr,
-            pointeeType: entry.pointeeType
+            pointeeType: entry.pointeeType,
+            extra: entry.closureFunctionType ? {
+                closureFunctionType: entry.closureFunctionType,
+                closureParamTypes: entry.closureParamTypes,
+                closureReturnType: entry.closureReturnType
+            } : undefined
         };
+    }
+
+    private allocateCell(type: LLVMTypeRef, name: string): LLVMValueRef {
+        const ctx = this.llvmHelper.getContext();
+        const raw = this.buildGCMalloc(LLVM.SizeOf(type), `${name}_cell_raw`);
+        return LLVM.BuildBitCast(this.builder, raw, LLVM.PointerType(type, 0), `${name}_cell`);
     }
 
     private toPtrArr(arr: any[]) { return arr; }
@@ -147,6 +170,79 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     private buildGCRealloc(ptr: LLVMValueRef, size: LLVMValueRef, name: string): LLVMValueRef {
         const gcRealloc = this.getGCReallocFunction();
         return LLVM.BuildCall2(this.builder, gcRealloc.type, gcRealloc.fn, this.toPtrArr([ptr, size]), 2, name);
+    }
+
+    private getFunctionTypeAnnotation(parameters: Parameter[], returnType: TypeAnnotation | null): FunctionTypeAnnotation {
+        const ctx = this.llvmHelper.getContext();
+        const voidToken = new Token(TokenType.IDENTIFIER, 'void', null, 0, 0);
+        return new FunctionTypeAnnotation(
+            parameters.map(p => p.type ?? new BasicTypeAnnotation(new Token(TokenType.I64, 'i64', null, 0, 0))),
+            returnType ?? new BasicTypeAnnotation(voidToken)
+        );
+    }
+
+    private getClosureMetadata(type: TypeAnnotation | null): { functionType?: LLVMTypeRef; paramTypes?: LLVMTypeRef[]; returnType?: LLVMTypeRef } {
+        if (!(type instanceof FunctionTypeAnnotation)) return {};
+        const closureType = this.llvmHelper.getLLVMType(type);
+        const functionType = this.llvmHelper.getClosureFunctionType(closureType) ?? undefined;
+        return {
+            functionType,
+            paramTypes: type.parameters.map(p => this.llvmHelper.getLLVMType(p)),
+            returnType: this.llvmHelper.getLLVMType(type.returnType)
+        };
+    }
+
+    private collectCaptures(expr: FunctionLiteralExpr): CaptureEntry[] {
+        const params = new Set(expr.parameters.map(p => p.name.lexeme));
+        const locals = new Set<string>(params);
+        const captures = new Map<string, CaptureEntry>();
+
+        const visitExpr = (node: Expr) => {
+            if (node instanceof IdentifierExpr) {
+                const name = node.name.lexeme;
+                if (!locals.has(name)) {
+                    const symbol = this.currentScope.find(name);
+                    if (symbol && symbol.depth > 0) captures.set(name, { name, symbol });
+                }
+                return;
+            }
+            if (node instanceof FunctionLiteralExpr) return;
+            if (node instanceof BinaryExpr) { visitExpr(node.left); visitExpr(node.right); return; }
+            if (node instanceof UnaryExpr) { visitExpr(node.right); return; }
+            if (node instanceof GroupingExpr) { visitExpr(node.expression); return; }
+            if (node instanceof CallExpr) { visitExpr(node.callee); node.args.forEach(visitExpr); return; }
+            if (node instanceof GetExpr) { visitExpr(node.object); return; }
+            if (node instanceof IndexExpr) { visitExpr(node.array); visitExpr(node.index); return; }
+            if (node instanceof AssignExpr) { visitExpr(node.target); visitExpr(node.value); return; }
+            if (node instanceof AsExpr) { visitExpr(node.expression); return; }
+            if (node instanceof ObjectLiteralExpr) { node.properties.forEach(visitExpr); return; }
+            if (node instanceof NewExpr) { visitExpr(node.callee); node.args.forEach(visitExpr); return; }
+            if (node instanceof DeleteExpr) { visitExpr(node.target); return; }
+            if (node instanceof AddressOfExpr) { visitExpr(node.expression); return; }
+            if (node instanceof DereferenceExpr) { visitExpr(node.expression); return; }
+            if (node instanceof ArrayLiteralExpr) { node.elements.forEach(visitExpr); return; }
+        };
+
+        const visitStmt = (node: Stmt) => {
+            if (node instanceof LetStmt || node instanceof ConstStmt) {
+                if (node.initializer) visitExpr(node.initializer);
+                locals.add(node.name.lexeme);
+                return;
+            }
+            if (node instanceof ExpressionStmt) { visitExpr(node.expression); return; }
+            if (node instanceof ReturnStmt) { if (node.value) visitExpr(node.value); return; }
+            if (node instanceof BlockStmt) { node.statements.forEach(visitStmt); return; }
+            if (node instanceof IfStmt) {
+                visitExpr(node.condition);
+                visitStmt(node.thenBranch);
+                if (node.elseBranch) visitStmt(node.elseBranch);
+                return;
+            }
+            if (node instanceof WhileStmt) { visitExpr(node.condition); visitStmt(node.body); return; }
+        };
+
+        expr.body.statements.forEach(visitStmt);
+        return Array.from(captures.values());
     }
 
     private getGlobalCStringPtr(value: string): LLVMValueRef {
@@ -644,15 +740,34 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 return { value: LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, ""), type: LLVM.GetReturnType(ft) };
             }
         }
+        const closureFunctionType = callee.extra?.closureFunctionType ?? this.llvmHelper.getClosureFunctionType(callee.type);
+        if (closureFunctionType) {
+            const closurePtr = callee.address ?? LLVM.BuildAlloca(this.builder, callee.type, "closure_tmp");
+            if (!callee.address) LLVM.BuildStore(this.builder, callee.value, closurePtr);
+            const codePtrType = LLVM.StructGetTypeAtIndex(callee.type, 0);
+            const codePtr = LLVM.BuildLoad2(this.builder, codePtrType, LLVM.BuildStructGEP2(this.builder, callee.type, closurePtr, 0, "closure_code_ptr"), "closure_code");
+            const envPtr = LLVM.BuildLoad2(this.builder, i8p, LLVM.BuildStructGEP2(this.builder, callee.type, closurePtr, 1, "closure_env_ptr"), "closure_env");
+            const paramTypes = callee.extra?.closureParamTypes ?? [];
+            const args = [envPtr, ...expr.args.map((a, i) => {
+                const arg = a.accept(this) as IRValue;
+                const paramType = paramTypes[i];
+                return paramType ? this.coerceToType(arg, paramType, "closure_arg_cast") : arg.value;
+            })];
+            return {
+                value: LLVM.BuildCall2(this.builder, closureFunctionType, codePtr, this.toPtrArr(args), args.length, "closure_call"),
+                type: callee.extra?.closureReturnType ?? LLVM.GetReturnType(closureFunctionType)
+            };
+        }
         const ft = callee.pointeeType; if (!ft) throw new Error("Missing function type");
-        const args = expr.args.map(a => {
+        const coercedArgs = expr.args.map((a, i) => {
             const v = a.accept(this) as IRValue;
             if (expr.callee instanceof GetExpr && expr.callee.object instanceof IdentifierExpr && expr.callee.object.name.lexeme === 'clib') {
                 if (v.type === this.stringStructType || v.pointeeType === this.stringStructType) return LLVM.BuildLoad2(this.builder, i8p, LLVM.BuildStructGEP2(this.builder, this.stringStructType, v.address || v.value, 0, ""), "p");
             }
-            return v.value;
+            const paramType = callee.extra?.functionParamTypes?.[i];
+            return paramType ? this.coerceToType(v, paramType, "call_arg_cast") : v.value;
         });
-        return { value: LLVM.BuildCall2(this.builder, ft, callee.value, this.toPtrArr(args), args.length, ""), type: LLVM.GetReturnType(ft) };
+        return { value: LLVM.BuildCall2(this.builder, ft, callee.value, this.toPtrArr(coercedArgs), coercedArgs.length, ""), type: callee.extra?.functionReturnType ?? LLVM.GetReturnType(ft) };
     }
 
     visitBinaryExpr(e: BinaryExpr): IRValue {
@@ -710,7 +825,15 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
         const ctx = this.llvmHelper.getContext(), rt = this.llvmHelper.getLLVMType(d.returnType), pts = d.parameters.map(p => this.llvmHelper.getLLVMType(p.type));
         const ft = LLVM.FunctionType(rt, this.toPtrArr(pts), pts.length, 0);
-        if (this.pass === 'declaration') { this.globalScope.define(d.name.lexeme, { llvmType: ft, ptr: LLVM.AddFunction(this.module, n, ft), depth: 0 }); }
+        if (this.pass === 'declaration') {
+            this.globalScope.define(d.name.lexeme, {
+                llvmType: ft,
+                ptr: LLVM.AddFunction(this.module, n, ft),
+                depth: 0,
+                functionParamTypes: pts,
+                functionReturnType: rt
+            });
+        }
         else {
             const f = LLVM.GetNamedFunction(this.module, n); 
             if (!f) throw new Error(`Function ${n} not found during definition pass`);
@@ -724,7 +847,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 this.emitGCInit();
             }
             d.parameters.forEach((p, i) => {
-                const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
+                const pt = this.llvmHelper.getLLVMType(p.type), a = this.allocateCell(pt, p.name.lexeme);
                 LLVM.BuildStore(this.builder, LLVM.GetParam(f, i), a); this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1 });
             });
             d.body.statements.forEach(s => s.accept(this));
@@ -739,8 +862,17 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const initializer = s.initializer ? (s.initializer.accept(this) as IRValue) : null;
         const t = s.type ? this.llvmHelper.getLLVMType(s.type) : initializer?.type;
         if (!t) throw new Error(`Variable '${s.name.lexeme}' requires a type annotation or initializer.`);
-        const p = LLVM.BuildAlloca(this.builder, t, s.name.lexeme);
-        this.currentScope.define(s.name.lexeme, { llvmType: t, ptr: p, depth: this.currentScope.depth, pointeeType: initializer?.pointeeType });
+        const p = this.allocateCell(t, s.name.lexeme);
+        const closureMetadata = this.getClosureMetadata(s.type ?? (s.initializer instanceof FunctionLiteralExpr ? this.getFunctionTypeAnnotation(s.initializer.parameters, s.initializer.returnType) : null));
+        this.currentScope.define(s.name.lexeme, {
+            llvmType: t,
+            ptr: p,
+            depth: this.currentScope.depth,
+            pointeeType: initializer?.pointeeType,
+            closureFunctionType: initializer?.extra?.closureFunctionType ?? closureMetadata.functionType,
+            closureParamTypes: initializer?.extra?.closureParamTypes ?? closureMetadata.paramTypes,
+            closureReturnType: initializer?.extra?.closureReturnType ?? closureMetadata.returnType
+        });
         if (initializer) LLVM.BuildStore(this.builder, this.coerceToType(initializer, t, "init_cast"), p);
     }
 
@@ -857,7 +989,83 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitDeleteExpr(e: DeleteExpr): IRValue { throw 0; }
     visitAddressOfExpr(e: AddressOfExpr): IRValue { throw 0; }
     visitDereferenceExpr(e: DereferenceExpr): IRValue { throw 0; }
-    visitFunctionLiteralExpr(e: FunctionLiteralExpr): IRValue { throw 0; }
+    visitFunctionLiteralExpr(e: FunctionLiteralExpr): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const functionTypeAnnotation = this.getFunctionTypeAnnotation(e.parameters, e.returnType);
+        const closureType = this.llvmHelper.getLLVMType(functionTypeAnnotation);
+        const functionType = this.llvmHelper.getClosureFunctionType(closureType);
+        if (!functionType) throw new Error("Missing closure function type.");
+
+        const captures = this.collectCaptures(e);
+        const envFieldTypes = captures.map(c => LLVM.PointerType(c.symbol.llvmType, 0));
+        const envType = LLVM.StructTypeInContext(ctx, this.toPtrArr(envFieldTypes), envFieldTypes.length, 0);
+        const closureName = `yu_closure_${this.labelCounter++}`;
+        const closureFn = LLVM.AddFunction(this.module, closureName, functionType);
+
+        const outerBlock = LLVM.GetInsertBlock(this.builder);
+        const envRaw = this.buildGCMalloc(LLVM.SizeOf(envType), "closure_env_raw");
+        const envPtr = LLVM.BuildBitCast(this.builder, envRaw, LLVM.PointerType(envType, 0), "closure_env");
+        captures.forEach((capture, index) => {
+            const slot = LLVM.BuildStructGEP2(this.builder, envType, envPtr, index, "capture_slot");
+            LLVM.BuildStore(this.builder, capture.symbol.ptr, slot);
+        });
+
+        const closurePtr = LLVM.BuildAlloca(this.builder, closureType, "closure");
+        LLVM.BuildStore(this.builder, closureFn, LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 0, "closure_code_slot"));
+        LLVM.BuildStore(this.builder, LLVM.BuildBitCast(this.builder, envPtr, i8Ptr, "closure_env_i8"), LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 1, "closure_env_slot"));
+        const closureValue = LLVM.BuildLoad2(this.builder, closureType, closurePtr, "closure_value");
+
+        LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, closureFn, "entry"));
+        const prevScope = this.currentScope;
+        const prevFunctionName = this.currentFunctionName;
+        const prevReturnType = this.currentFunctionReturnType;
+        const prevEnvType = this.currentClosureEnvType;
+        const prevEnvPtr = this.currentClosureEnvPtr;
+        const prevCaptures = this.currentClosureCaptures;
+
+        this.currentScope = new Scope(this.globalScope, 1);
+        this.currentFunctionName = closureName;
+        this.currentFunctionReturnType = this.llvmHelper.getLLVMType(e.returnType);
+        this.currentClosureEnvType = envType;
+        this.currentClosureEnvPtr = LLVM.BuildBitCast(this.builder, LLVM.GetParam(closureFn, 0), LLVM.PointerType(envType, 0), "env");
+        this.currentClosureCaptures = captures;
+
+        captures.forEach((capture, index) => {
+            const slot = LLVM.BuildStructGEP2(this.builder, envType, this.currentClosureEnvPtr, index, "capture_load_slot");
+            const cellPtr = LLVM.BuildLoad2(this.builder, LLVM.PointerType(capture.symbol.llvmType, 0), slot, `${capture.name}_cell`);
+            this.currentScope.define(capture.name, { ...capture.symbol, ptr: cellPtr, depth: 1 });
+        });
+
+        e.parameters.forEach((p, i) => {
+            const pt = this.llvmHelper.getLLVMType(p.type);
+            const cell = this.allocateCell(pt, p.name.lexeme);
+            LLVM.BuildStore(this.builder, LLVM.GetParam(closureFn, i + 1), cell);
+            this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: cell, depth: 1 });
+        });
+
+        e.body.statements.forEach(s => s.accept(this));
+        if (LLVM.GetTypeKind(this.currentFunctionReturnType) === 0) LLVM.BuildRetVoid(this.builder);
+
+        this.currentScope = prevScope;
+        this.currentFunctionName = prevFunctionName;
+        this.currentFunctionReturnType = prevReturnType;
+        this.currentClosureEnvType = prevEnvType;
+        this.currentClosureEnvPtr = prevEnvPtr;
+        this.currentClosureCaptures = prevCaptures;
+        LLVM.PositionBuilderAtEnd(this.builder, outerBlock);
+
+        return {
+            value: closureValue,
+            type: closureType,
+            address: closurePtr,
+            extra: {
+                closureFunctionType: functionType,
+                closureParamTypes: functionTypeAnnotation.parameters.map(p => this.llvmHelper.getLLVMType(p)),
+                closureReturnType: this.llvmHelper.getLLVMType(functionTypeAnnotation.returnType)
+            }
+        };
+    }
     visitConstStmt(s: ConstStmt) {}
     visitIfStmt(s: IfStmt) {
         const ctx = this.llvmHelper.getContext();

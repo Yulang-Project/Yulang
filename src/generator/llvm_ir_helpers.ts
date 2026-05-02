@@ -25,6 +25,8 @@ export class LLVMIRHelper {
     private namedStructs: Map<string, LLVMTypeRef> = new Map();
     private arrayStructs: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
     private arrayElementTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
+    private functionStructs: Map<string, LLVMTypeRef> = new Map();
+    private closureFunctionTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
 
     constructor() {
         this.context = LLVM.ContextCreate();
@@ -101,6 +103,10 @@ export class LLVMIRHelper {
         }
 
         if (typeAnnotation instanceof FunctionTypeAnnotation) {
+            const key = this.getFunctionTypeKey(typeAnnotation);
+            const existing = this.functionStructs.get(key);
+            if (existing) return existing;
+
             const paramTypes = typeAnnotation.parameters.map(p => this.getLLVMType(p));
             const returnType = this.getLLVMType(typeAnnotation.returnType);
             
@@ -112,7 +118,10 @@ export class LLVMIRHelper {
 
             // Represent closures as a struct: { code_ptr, env_ptr }
             const structElements = [funcPtrType, i8PtrType];
-            return LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
+            const closureType = LLVM.StructTypeInContext(this.context, structElements, structElements.length, 0);
+            this.functionStructs.set(key, closureType);
+            this.closureFunctionTypes.set(closureType, funcType);
+            return closureType;
         }
 
         if (typeAnnotation instanceof ArrayTypeAnnotation) {
@@ -207,5 +216,22 @@ export class LLVMIRHelper {
 
     public getArrayElementType(arrayType: LLVMTypeRef): LLVMTypeRef | null {
         return this.arrayElementTypes.get(arrayType) || null;
+    }
+
+    public getClosureFunctionType(closureType: LLVMTypeRef): LLVMTypeRef | null {
+        return this.closureFunctionTypes.get(closureType) || null;
+    }
+
+    private getTypeKey(typeAnnotation: TypeAnnotation | null): string {
+        if (!typeAnnotation) return 'void';
+        if (typeAnnotation instanceof PointerTypeAnnotation) return `ptr:${this.getTypeKey(typeAnnotation.baseType)}`;
+        if (typeAnnotation instanceof ArrayTypeAnnotation) return `array:${this.getTypeKey(typeAnnotation.elementType)}`;
+        if (typeAnnotation instanceof FunctionTypeAnnotation) return this.getFunctionTypeKey(typeAnnotation);
+        if (typeAnnotation instanceof BasicTypeAnnotation) return `basic:${typeAnnotation.name.lexeme}`;
+        return 'unknown';
+    }
+
+    private getFunctionTypeKey(typeAnnotation: FunctionTypeAnnotation): string {
+        return `fun(${typeAnnotation.parameters.map(p => this.getTypeKey(p)).join(',')})->${this.getTypeKey(typeAnnotation.returnType)}`;
     }
 }
