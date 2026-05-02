@@ -107,6 +107,48 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return LLVM.BuildBitCast(this.builder, v.value, targetType, name);
     }
 
+    private getGCInitFunction(): LLVMValueRef {
+        const ctx = this.llvmHelper.getContext();
+        const ft = LLVM.FunctionType(LLVM.VoidTypeInContext(ctx), this.toPtrArr([]), 0, 0);
+        let fn = LLVM.GetNamedFunction(this.module, "GC_init");
+        if (!fn) fn = LLVM.AddFunction(this.module, "GC_init", ft);
+        return fn;
+    }
+
+    private emitGCInit() {
+        const ctx = this.llvmHelper.getContext();
+        const ft = LLVM.FunctionType(LLVM.VoidTypeInContext(ctx), this.toPtrArr([]), 0, 0);
+        LLVM.BuildCall2(this.builder, ft, this.getGCInitFunction(), this.toPtrArr([]), 0, "");
+    }
+
+    private getGCMallocFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const ft = LLVM.FunctionType(i8Ptr, this.toPtrArr([LLVM.Int64TypeInContext(ctx)]), 1, 0);
+        let fn = LLVM.GetNamedFunction(this.module, "GC_malloc");
+        if (!fn) fn = LLVM.AddFunction(this.module, "GC_malloc", ft);
+        return { fn, type: ft };
+    }
+
+    private getGCReallocFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const ft = LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, LLVM.Int64TypeInContext(ctx)]), 2, 0);
+        let fn = LLVM.GetNamedFunction(this.module, "GC_realloc");
+        if (!fn) fn = LLVM.AddFunction(this.module, "GC_realloc", ft);
+        return { fn, type: ft };
+    }
+
+    private buildGCMalloc(size: LLVMValueRef, name: string): LLVMValueRef {
+        const gcMalloc = this.getGCMallocFunction();
+        return LLVM.BuildCall2(this.builder, gcMalloc.type, gcMalloc.fn, this.toPtrArr([size]), 1, name);
+    }
+
+    private buildGCRealloc(ptr: LLVMValueRef, size: LLVMValueRef, name: string): LLVMValueRef {
+        const gcRealloc = this.getGCReallocFunction();
+        return LLVM.BuildCall2(this.builder, gcRealloc.type, gcRealloc.fn, this.toPtrArr([ptr, size]), 2, name);
+    }
+
     private getGlobalCStringPtr(value: string): LLVMValueRef {
         const entry = this.llvmHelper.createGlobalString(value) as any;
         const ctx = this.llvmHelper.getContext();
@@ -124,12 +166,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             numericValue = LLVM.BuildSExt(this.builder, v.value, i64, "to_i64");
         }
 
-        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
-        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
-        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
-
         const bufferSize = LLVM.ConstInt(i64, 64n as any, 0);
-        const bufferPtr = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([bufferSize]), 1, 'strbuf');
+        const bufferPtr = this.buildGCMalloc(bufferSize, 'strbuf');
 
         const sprintfType = LLVM.FunctionType(LLVM.Int32TypeInContext(ctx), this.toPtrArr([i8Ptr, i8Ptr]), 2, 1);
         let sprintfFn = LLVM.GetNamedFunction(this.module, 'sprintf');
@@ -183,11 +221,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const arrayPtr = LLVM.BuildAlloca(this.builder, arrayType, "args");
 
         const argc64 = LLVM.BuildSExt(this.builder, argc, i64, "argc64");
-        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
-        let mallocFn = LLVM.GetNamedFunction(this.module, "malloc");
-        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, "malloc", mallocType);
         const byteSize = LLVM.BuildMul(this.builder, argc64, LLVM.SizeOf(this.stringStructType), "args_bytes");
-        const rawData = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([byteSize]), 1, "args_raw");
+        const rawData = this.buildGCMalloc(byteSize, "args_raw");
         const dataPtr = LLVM.BuildBitCast(this.builder, rawData, LLVM.PointerType(this.stringStructType, 0), "args_data");
         LLVM.BuildStore(this.builder, dataPtr, LLVM.BuildStructGEP2(this.builder, arrayType, arrayPtr, 0, ""));
         LLVM.BuildStore(this.builder, argc64, LLVM.BuildStructGEP2(this.builder, arrayType, arrayPtr, 1, ""));
@@ -239,6 +274,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const mainType = LLVM.FunctionType(i32, this.toPtrArr([i32, argvType]), 2, 0);
         const mainFn = LLVM.AddFunction(this.module, "main", mainType);
         LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, mainFn, "entry"));
+        this.emitGCInit();
 
         const argc = LLVM.GetParam(mainFn, 0);
         const argv = LLVM.GetParam(mainFn, 1);
@@ -280,10 +316,6 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         let fcloseFn = LLVM.GetNamedFunction(this.module, 'fclose');
         if (!fcloseFn) fcloseFn = LLVM.AddFunction(this.module, 'fclose', fcloseType);
 
-        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
-        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
-        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
-
         const pathPtr = this.toCStringPointer(pathArg);
         const readMode = this.getGlobalCStringPtr('rb');
         const filePtr = LLVM.BuildCall2(this.builder, fopenType, fopenFn, this.toPtrArr([pathPtr, readMode]), 2, 'file_read');
@@ -293,7 +325,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         LLVM.BuildCall2(this.builder, fseekType, fseekFn, this.toPtrArr([filePtr, LLVM.ConstInt(i64, 0n as any, 0), LLVM.ConstInt(i32, 0n as any, 0)]), 3, '');
 
         const allocSize = LLVM.BuildAdd(this.builder, fileLen, LLVM.ConstInt(i64, 1n as any, 0), 'alloc_size');
-        const buffer = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([allocSize]), 1, 'file_buf');
+        const buffer = this.buildGCMalloc(allocSize, 'file_buf');
 
         LLVM.BuildCall2(this.builder, freadType, freadFn, this.toPtrArr([buffer, LLVM.ConstInt(i64, 1n as any, 0), fileLen, filePtr]), 4, '');
         const endPtr = LLVM.BuildInBoundsGEP2(this.builder, i8, buffer, this.toPtrArr([fileLen]), 1, 'end_ptr');
@@ -370,6 +402,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             malloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0),
             realloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
             free: () => LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr]), 1, 0),
+            GC_init: () => LLVM.FunctionType(voidType, this.toPtrArr([]), 0, 0),
+            GC_malloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0),
+            GC_realloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
+            GC_free: () => LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr]), 1, 0),
 
             exit: () => LLVM.FunctionType(voidType, this.toPtrArr([i32]), 1, 0),
             system: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
@@ -583,10 +619,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 LLVM.BuildCondBr(this.builder, isFull, rBB, pBB);
                 LLVM.PositionBuilderAtEnd(this.builder, rBB);
                 const nc = LLVM.BuildMul(this.builder, c, LLVM.ConstInt(i64, 2n as any, 0), ""), dfp = LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, "");
-                const od = LLVM.BuildLoad2(this.builder, i8p, dfp, ""), rft = LLVM.FunctionType(i8p, this.toPtrArr([i8p, i64]), 2, 0);
-                let rf = LLVM.GetNamedFunction(this.module, "realloc"); if (!rf) rf = LLVM.AddFunction(this.module, "realloc", rft);
+                const od = LLVM.BuildLoad2(this.builder, i8p, dfp, "");
                 const sizePerElement = LLVM.SizeOf(val.type);
-                const nd = LLVM.BuildCall2(this.builder, rft, rf, this.toPtrArr([od, LLVM.BuildMul(this.builder, nc, sizePerElement, "")]), 2, "");
+                const nd = this.buildGCRealloc(od, LLVM.BuildMul(this.builder, nc, sizePerElement, ""), "");
                 LLVM.BuildStore(this.builder, nd, dfp); LLVM.BuildStore(this.builder, nc, cPtr); LLVM.BuildBr(this.builder, pBB);
                 LLVM.PositionBuilderAtEnd(this.builder, pBB);
                 const dp = LLVM.BuildLoad2(this.builder, LLVM.PointerType(val.type, 0), LLVM.BuildStructGEP2(this.builder, type, objPtr, 0, ""), "");
@@ -649,13 +684,12 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitArrayLiteralExpr(e: ArrayLiteralExpr): IRValue {
         const ctx = this.llvmHelper.getContext(), els = e.elements.map(el => el.accept(this) as IRValue);
         const et = els[0]?.type || LLVM.Int64TypeInContext(ctx), st = this.llvmHelper.ensureArrayStructDefinition(et);
-        const ap = LLVM.BuildAlloca(this.builder, st, "a"), i64 = LLVM.Int64TypeInContext(ctx), i8p = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
-        const cap = BigInt(Math.max(els.length, 4)), mft = LLVM.FunctionType(i8p, this.toPtrArr([i64]), 1, 0);
-        let mf = LLVM.GetNamedFunction(this.module, "malloc"); if (!mf) mf = LLVM.AddFunction(this.module, "malloc", mft);
+        const ap = LLVM.BuildAlloca(this.builder, st, "a"), i64 = LLVM.Int64TypeInContext(ctx);
+        const cap = BigInt(Math.max(els.length, 4));
         
         const sizePerElement = LLVM.SizeOf(et);
         const totalSize = LLVM.BuildMul(this.builder, LLVM.ConstInt(i64, cap as any, 0), sizePerElement, "total_size");
-        const md = LLVM.BuildCall2(this.builder, mft, mf, this.toPtrArr([totalSize]), 1, "");
+        const md = this.buildGCMalloc(totalSize, "");
         
         const dp = LLVM.BuildBitCast(this.builder, md, LLVM.PointerType(et, 0), "");
         LLVM.BuildStore(this.builder, dp, LLVM.BuildStructGEP2(this.builder, st, ap, 0, ""));
@@ -686,6 +720,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             this.currentFunctionName = d.name.lexeme;
             this.currentFunctionReturnType = rt;
             this.currentScope = new Scope(this.currentScope, 1);
+            if (n === 'main') {
+                this.emitGCInit();
+            }
             d.parameters.forEach((p, i) => {
                 const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
                 LLVM.BuildStore(this.builder, LLVM.GetParam(f, i), a); this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1 });
@@ -798,12 +835,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const i64 = LLVM.Int64TypeInContext(ctx);
         const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
         
-        const mallocType = LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0);
-        let mallocFn = LLVM.GetNamedFunction(this.module, 'malloc');
-        if (!mallocFn) mallocFn = LLVM.AddFunction(this.module, 'malloc', mallocType);
-        
         const size = LLVM.SizeOf(structType);
-        const objPtrRaw = LLVM.BuildCall2(this.builder, mallocType, mallocFn, this.toPtrArr([size]), 1, "new_obj_raw");
+        const objPtrRaw = this.buildGCMalloc(size, "new_obj_raw");
         const objPtr = LLVM.BuildBitCast(this.builder, objPtrRaw, LLVM.PointerType(structType, 0), "new_obj");
 
         const initMethod = classDecl.methods.find(m => m.name.lexeme === 'init');

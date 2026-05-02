@@ -44,7 +44,7 @@ export class ProjectFinder implements IFinder {
 
     // 获取额外的链接器标志
     getLinkerFlags(osIdentifier: string, archIdentifier: string): string[] {
-        // Now using gcc/clang, so we might need -lc, etc.
-        return ['-lc'];
+        // Link the lightweight GC runtime used by compiler-generated allocations.
+        return ['-l:libgc.so.1', '-lc'];
     }
 }
