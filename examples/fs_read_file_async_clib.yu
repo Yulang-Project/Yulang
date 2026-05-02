@@ -1,0 +1,10 @@
+export function main(): i32 {
+    clib.writefile("/tmp/yu_fs_read_file_async_clib.txt", "hello from clib readFile");
+
+    clib.readFile("/tmp/yu_fs_read_file_async_clib.txt", (err: i32, data: string): void => {
+        clib.printf("clib readFile err: %d\n", err);
+        clib.printf("clib readFile data: %s\n", data.ptr);
+    });
+
+    return 0;
+}

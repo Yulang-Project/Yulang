@@ -144,6 +144,33 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         LLVM.BuildCall2(this.builder, ft, this.getGCInitFunction(), this.toPtrArr([]), 0, "");
     }
 
+    private getUVInitFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
+        const ctx = this.llvmHelper.getContext();
+        const ft = LLVM.FunctionType(LLVM.VoidTypeInContext(ctx), this.toPtrArr([]), 0, 0);
+        let fn = LLVM.GetNamedFunction(this.module, "yu_uv_init");
+        if (!fn) fn = LLVM.AddFunction(this.module, "yu_uv_init", ft);
+        return { fn, type: ft };
+    }
+
+    private getUVRunFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
+        const ctx = this.llvmHelper.getContext();
+        const ft = LLVM.FunctionType(LLVM.Int32TypeInContext(ctx), this.toPtrArr([]), 0, 0);
+        let fn = LLVM.GetNamedFunction(this.module, "yu_uv_run");
+        if (!fn) fn = LLVM.AddFunction(this.module, "yu_uv_run", ft);
+        return { fn, type: ft };
+    }
+
+    private emitRuntimeInit() {
+        this.emitGCInit();
+        const uvInit = this.getUVInitFunction();
+        LLVM.BuildCall2(this.builder, uvInit.type, uvInit.fn, this.toPtrArr([]), 0, "");
+    }
+
+    private emitUVRun() {
+        const uvRun = this.getUVRunFunction();
+        LLVM.BuildCall2(this.builder, uvRun.type, uvRun.fn, this.toPtrArr([]), 0, "");
+    }
+
     private getGCMallocFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
         const ctx = this.llvmHelper.getContext();
         const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
@@ -382,6 +409,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         const callArgs = d.parameters.length === 2 ? [argc, argsArray.value] : [argsArray.value];
         const result = LLVM.BuildCall2(this.builder, yuMainFunctionType, yuMain, this.toPtrArr(callArgs), callArgs.length, "yu_main_result");
         const returnValue = yuMainType === i32 ? result : this.coerceToType({ value: result, type: yuMainType }, i32, "main_ret");
+        this.emitUVRun();
         LLVM.BuildRet(this.builder, returnValue);
     }
 
@@ -465,6 +493,29 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return { value: LLVM.BuildTrunc(this.builder, wrote, i32, 'wrote_i32'), type: i32 };
     }
 
+    private emitClibReadFileAsync(pathArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([this.stringStructType, i8Ptr, i8Ptr]), 3, 0);
+        let readFileFn = LLVM.GetNamedFunction(this.module, 'yu_fs_readFile');
+        if (!readFileFn) readFileFn = LLVM.AddFunction(this.module, 'yu_fs_readFile', ft);
+
+        const closureType = callbackArg.type;
+        const closurePtr = callbackArg.address ?? LLVM.BuildAlloca(this.builder, closureType, "read_file_cb_tmp");
+        if (!callbackArg.address) LLVM.BuildStore(this.builder, callbackArg.value, closurePtr);
+
+        const codePtrType = LLVM.StructGetTypeAtIndex(closureType, 0);
+        const codePtr = LLVM.BuildLoad2(this.builder, codePtrType, LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 0, "read_file_cb_code_slot"), "read_file_cb_code");
+        const envPtr = LLVM.BuildLoad2(this.builder, i8Ptr, LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 1, "read_file_cb_env_slot"), "read_file_cb_env");
+        const codeAsPtr = LLVM.BuildPointerCast(this.builder, codePtr, i8Ptr, "read_file_cb_code_ptr");
+
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, readFileFn, this.toPtrArr([pathArg.value, codeAsPtr, envPtr]), 3, "read_file_status"),
+            type: i32
+        };
+    }
+
     private getClibFunctionType(name: string): LLVMTypeRef {
         const ctx = this.llvmHelper.getContext();
         const i8 = LLVM.Int8TypeInContext(ctx);
@@ -502,6 +553,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             GC_malloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i64]), 1, 0),
             GC_realloc: () => LLVM.FunctionType(i8Ptr, this.toPtrArr([i8Ptr, i64]), 2, 0),
             GC_free: () => LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr]), 1, 0),
+            readFile: () => LLVM.FunctionType(i32, this.toPtrArr([this.stringStructType, i8Ptr, i8Ptr]), 3, 0),
 
             exit: () => LLVM.FunctionType(voidType, this.toPtrArr([i32]), 1, 0),
             system: () => LLVM.FunctionType(i32, this.toPtrArr([i8Ptr]), 1, 0),
@@ -700,6 +752,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const contentArg = expr.args[1]!.accept(this) as IRValue;
                 return this.emitClibWriteFile(pathArg, contentArg, true);
             }
+            if (clibName === 'readFile') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const callbackArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitClibReadFileAsync(pathArg, callbackArg);
+            }
         }
 
         if (callee.extra?.isMethod) {
@@ -840,11 +897,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, f, "e"));
             const previousFunctionName = this.currentFunctionName;
             const previousFunctionReturnType = this.currentFunctionReturnType;
-            this.currentFunctionName = d.name.lexeme;
+            this.currentFunctionName = n;
             this.currentFunctionReturnType = rt;
             this.currentScope = new Scope(this.currentScope, 1);
             if (n === 'main') {
-                this.emitGCInit();
+                this.emitRuntimeInit();
             }
             d.parameters.forEach((p, i) => {
                 const pt = this.llvmHelper.getLLVMType(p.type), a = this.allocateCell(pt, p.name.lexeme);
@@ -897,8 +954,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 val = LLVM.BuildTrunc(this.builder, v.value, i32, "main_ret_i32");
             }
 
+            if (this.currentFunctionName === 'main') this.emitUVRun();
             LLVM.BuildRet(this.builder, val); 
         } else {
+            if (this.currentFunctionName === 'main') this.emitUVRun();
             LLVM.BuildRetVoid(this.builder); 
         }
     }

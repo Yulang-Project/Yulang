@@ -1,0 +1,12 @@
+import { readFile, write_text } from "std:fs";
+
+export function main(): i32 {
+    write_text("/tmp/yu_fs_read_file_async.txt", "hello from libuv readFile");
+
+    readFile("/tmp/yu_fs_read_file_async.txt", (err: i32, data: string): void => {
+        clib.printf("readFile err: %d\n", err);
+        clib.printf("readFile data: %s\n", data.ptr);
+    });
+
+    return 0;
+}

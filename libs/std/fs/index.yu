@@ -10,6 +10,10 @@ export function read_text(path: string): string {
     return clib.readfile(path);
 }
 
+export function readFile(path: string, callback: (err: i32, data: string) => void): void {
+    clib.readFile(path, callback);
+}
+
 export function remove_file(path: string): i32 {
     return clib.unlink(path);
 }

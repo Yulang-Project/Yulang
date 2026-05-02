@@ -173,6 +173,8 @@ cli
         }
         const llPath = path.join(tempDir, `${outputFileName}.ll`);
         const objPath = path.join(tempDir, `${outputFileName}.o`);
+        const uvRuntimeSourcePath = path.join(projectRoot, 'runtime', 'yu_uv_runtime.c');
+        const uvRuntimeObjPath = path.join(tempDir, 'yu_uv_runtime.o');
 
         fs.writeFileSync(llPath, llvmIr);
 
@@ -187,10 +189,12 @@ cli
 
           if (options.target === 'exec') {
             // 5. Link object file into an executable using gcc
+            console.log(`  [CMD] gcc -c ${uvRuntimeSourcePath} -o ${uvRuntimeObjPath}`);
+            execFileSync('gcc', ['-c', uvRuntimeSourcePath, '-o', uvRuntimeObjPath], { stdio: 'inherit' });
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
             const cc = 'gcc';
-            console.log(`  [CMD] ${cc} -o ${outputFilePath} ${objPath} ${linkerFlags.join(' ')}`);
-            execFileSync(cc, ['-o', outputFilePath, objPath, ...linkerFlags], { stdio: 'inherit' });
+            console.log(`  [CMD] ${cc} -o ${outputFilePath} ${objPath} ${uvRuntimeObjPath} ${linkerFlags.join(' ')}`);
+            execFileSync(cc, ['-o', outputFilePath, objPath, uvRuntimeObjPath, ...linkerFlags], { stdio: 'inherit' });
           } else if (options.target === 'static-lib') {
             // 5. Create static library (.a)
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);
@@ -207,6 +211,9 @@ cli
       }
     } catch (error: any) {
       console.error(`Compilation failed: ${error.message}`);
+      if (options.debug && error.stack) {
+        console.error(error.stack);
+      }
       if (error.stderr) {
         console.error(`Stderr: ${error.stderr.toString()}`);
       }
