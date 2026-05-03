@@ -1,0 +1,11 @@
+import { writeFile } from "std:fs";
+import { readFile } from "std:fs/promises";
+
+export function main(): i32 {
+    writeFile("/tmp/yu_fs_read_file_promises.txt", "hello from libuv promises");
+
+    let data: string = await readFile("/tmp/yu_fs_read_file_promises.txt");
+    clib.printf("readFile promise data: %s\n", data.ptr);
+
+    return 0;
+}

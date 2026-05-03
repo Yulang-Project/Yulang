@@ -175,7 +175,6 @@ cli
         const objPath = path.join(tempDir, `${outputFileName}.o`);
         const uvRuntimeSourcePath = path.join(projectRoot, 'runtime', 'yu_uv_runtime.c');
         const uvRuntimeObjPath = path.join(tempDir, 'yu_uv_runtime.o');
-
         fs.writeFileSync(llPath, llvmIr);
 
         if (options.target === 'asm') {
@@ -188,9 +187,10 @@ cli
           execFileSync('llc', ['-filetype=obj', '-relocation-model=pic', llPath, '-o', objPath], { stdio: 'inherit' });
 
           if (options.target === 'exec') {
-            // 5. Link object file into an executable using gcc
             console.log(`  [CMD] gcc -c ${uvRuntimeSourcePath} -o ${uvRuntimeObjPath}`);
             execFileSync('gcc', ['-c', uvRuntimeSourcePath, '-o', uvRuntimeObjPath], { stdio: 'inherit' });
+
+            // 5. Link object file into an executable using gcc
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
             const cc = 'gcc';
             console.log(`  [CMD] ${cc} -o ${outputFilePath} ${objPath} ${uvRuntimeObjPath} ${linkerFlags.join(' ')}`);

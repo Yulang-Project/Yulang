@@ -162,11 +162,16 @@ export class DeclarationParser {
             this.parser.namespaceImports.set(importStmt.namespaceAlias.lexeme, new Map(
                 Array.from(exportedMap.keys()).map((name) => [name, name])
             ));
-            return Array.from(exportedMap.values());
+            return this.cloneImportedDeclarations(Array.from(exportedMap.values()));
         }
 
         if (importStmt.namedImports && importStmt.namedImports.length > 0) {
             const declarations: Stmt[] = [];
+            const declarationSet = new Set<Stmt>();
+            for (const dependency of this.collectDependencyDeclarations(moduleDeclarations)) {
+                declarations.push(dependency);
+                declarationSet.add(dependency);
+            }
             for (const importedNameToken of importStmt.namedImports) {
                 const importedName = importedNameToken.lexeme;
                 const declaration = exportedMap.get(importedName);
@@ -175,12 +180,15 @@ export class DeclarationParser {
                         `Module '${modulePath}' does not export '${importedName}'. (${this.parser.currentFilePath})`
                     );
                 }
-                declarations.push(declaration);
+                if (!declarationSet.has(declaration)) {
+                    declarations.push(declaration);
+                    declarationSet.add(declaration);
+                }
             }
-            return declarations;
+            return this.cloneImportedDeclarations(declarations);
         }
 
-        return Array.from(exportedMap.values());
+        return this.cloneImportedDeclarations(Array.from(exportedMap.values()));
     }
 
     private resolveImportPath(modulePath: string): string {
@@ -243,7 +251,44 @@ export class DeclarationParser {
         return null;
     }
 
+    public getDeclarationName(statement: Stmt): string | null {
+        if (statement instanceof FunctionDeclaration) return statement.name.lexeme;
+        if (statement instanceof LetStmt) return statement.name.lexeme;
+        if (statement instanceof ConstStmt) return statement.name.lexeme;
+        if (statement instanceof ClassDeclaration) return statement.name.lexeme;
+        if (statement instanceof StructDeclaration) return statement.name.lexeme;
+        return null;
+    }
 
+    private collectDependencyDeclarations(statements: Stmt[]): Stmt[] {
+        const dependencies: Stmt[] = [];
+        const exported = new Set<Stmt>();
+        for (const statement of statements) {
+            if (this.getExportedDeclarationName(statement)) {
+                exported.add(statement);
+            }
+        }
+        for (const statement of statements) {
+            if (!exported.has(statement)) {
+                dependencies.push(statement);
+            }
+        }
+        return dependencies;
+    }
+
+    private cloneImportedDeclarations(statements: Stmt[]): Stmt[] {
+        return statements.map((statement) => {
+            const cloned = Object.assign(Object.create(Object.getPrototypeOf(statement)), statement) as Stmt;
+            if (cloned instanceof FunctionDeclaration
+                || cloned instanceof LetStmt
+                || cloned instanceof ConstStmt
+                || cloned instanceof ClassDeclaration
+                || cloned instanceof StructDeclaration) {
+                cloned.isExported = false;
+            }
+            return cloned;
+        });
+    }
 
     public classDeclaration(): ClassDeclaration {
         let name: Token;

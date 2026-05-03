@@ -45,12 +45,20 @@ export class Parser {
 
     public parse(): Stmt[] {
         const statements: Stmt[] = [];
+        const importedNames = new Set<string>();
         while (!this.isAtEnd()) {
             const declaration = this.topLevelDeclaration();
             if (declaration !== null) {
                 if (declaration instanceof ImportStmt) {
                     const importedDeclarations = this.declarationParser.resolveImportDeclaration(declaration);
-                    statements.push(...importedDeclarations);
+                    for (const importedDeclaration of importedDeclarations) {
+                        const importedName = this.declarationParser.getDeclarationName(importedDeclaration);
+                        if (importedName) {
+                            if (importedNames.has(importedName)) continue;
+                            importedNames.add(importedName);
+                        }
+                        statements.push(importedDeclaration);
+                    }
                     continue;
                 }
                 statements.push(declaration);

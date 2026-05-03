@@ -1,51 +1,51 @@
-export function write_text(path: string, content: string): i32 {
-    return clib.writefile(path, content);
+import * as uv from "std:uv";
+
+export function writeFile(path: string, content: string): i32 {
+    return uv.uv_writefile(path, content);
 }
 
-export function append_text(path: string, content: string): i32 {
-    return clib.appendfile(path, content);
+export function appendFile(path: string, content: string): i32 {
+    return uv.uv_appendfile(path, content);
 }
 
-export function read_text(path: string): string {
-    return clib.readfile(path);
+export function readFileSync(path: string): string {
+    return uv.uv_read_text(path);
 }
 
 export function readFile(path: string, callback: (err: i32, data: string) => void): void {
-    clib.readFile(path, callback);
+    uv.uv_readFile(path, callback);
 }
 
-export function remove_file(path: string): i32 {
-    return clib.unlink(path);
+export function unlink(path: string): i32 {
+    return uv.uv_unlink(path);
 }
 
-export function rename_file(oldPath: string, newPath: string): i32 {
-    return clib.rename(oldPath, newPath);
+export function rename(oldPath: string, newPath: string): i32 {
+    return uv.uv_rename(oldPath, newPath);
 }
 
-export function make_dir(path: string, mode: i32): i32 {
-    return clib.mkdir(path, mode);
+export function mkdir(path: string, mode: i32): i32 {
+    return uv.uv_mkdir(path, mode);
 }
 
-export function remove_dir(path: string): i32 {
-    return clib.rmdir(path);
+export function rmdir(path: string): i32 {
+    return uv.uv_rmdir(path);
 }
 
-export function file_exists(path: string): i32 {
-    return clib.access(path, 0);
+export function access(path: string, mode: i32): i32 {
+    return uv.uv_access(path, mode);
 }
 
-export function chmod(path: string, mode: i32): i32 {
-    return clib.chmod(path.ptr, mode);
+export function exists(path: string): i32 {
+    return uv.uv_access(path, 0);
 }
 
-export function chown(path: string, owner: i32, group: i32): i32 {
-    return clib.chown(path.ptr, owner, group);
-}
-
-export function getcwd(): string {
-    return clib.getcwd();
-}
-
-export function chdir(path: string): i32 {
-    return clib.chdir(path.ptr);
-}
+// Legacy aliases.
+export function write_text(path: string, content: string): i32 { return uv.uv_writefile(path, content); }
+export function append_text(path: string, content: string): i32 { return uv.uv_appendfile(path, content); }
+export function read_text(path: string): string { return uv.uv_read_text(path); }
+export function remove_file(path: string): i32 { return uv.uv_unlink(path); }
+export function rename_file(oldPath: string, newPath: string): i32 { return uv.uv_rename(oldPath, newPath); }
+export function make_dir(path: string, mode: i32): i32 { return uv.uv_mkdir(path, mode); }
+export function remove_dir(path: string): i32 { return uv.uv_rmdir(path); }
+export function file_exists(path: string): i32 { return uv.uv_access(path, 0); }

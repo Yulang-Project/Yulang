@@ -2,7 +2,7 @@
 
 import { Token, TokenType } from '../token.js';
 import {
-    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation
+    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation, PromiseTypeAnnotation
 } from '../ast.js';
 import { Parser } from './index.js';
 
@@ -39,6 +39,13 @@ export class TypeParser {
             const returnType = this.parse();
             this.parser.consume(TokenType.GT, "Expect '>' after function return type.");
             return new FunctionTypeAnnotation(params, returnType);
+        }
+
+        if (this.parser.match(TokenType.PROMISE)) {
+            this.parser.consume(TokenType.LT, "Expect '<' after 'Promise'.");
+            const inner = this.parse();
+            this.parser.consume(TokenType.GT, "Expect '>' after Promise inner type.");
+            return new PromiseTypeAnnotation(inner);
         }
 
         if (this.parser.match(

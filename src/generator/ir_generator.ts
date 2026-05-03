@@ -1,9 +1,9 @@
 // src/generator/ir_generator.ts
 import {
     ASTNode, type ExprVisitor, type StmtVisitor,
-    Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, IndexExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, AddressOfExpr, DereferenceExpr, FunctionLiteralExpr, ArrayLiteralExpr,
+    Expr, LiteralExpr, BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, IndexExpr, AssignExpr, ThisExpr, AsExpr, AwaitExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, AddressOfExpr, DereferenceExpr, FunctionLiteralExpr, ArrayLiteralExpr,
     Stmt, ExpressionStmt, BlockStmt, LetStmt, ConstStmt, IfStmt, WhileStmt, ReturnStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, ImportStmt, DeclareFunction, UsingStmt,
-    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation
+    TypeAnnotation, BasicTypeAnnotation, ArrayTypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation, PromiseTypeAnnotation
 } from '../ast.js';
 import { Token, TokenType } from '../token.js';
 import { LLVMIRHelper } from './llvm_ir_helpers.js';
@@ -17,10 +17,10 @@ export type IRValue = {
     type: LLVMTypeRef, 
     address?: LLVMValueRef,
     pointeeType?: LLVMTypeRef,
-    extra?: { isMethod?: boolean; methodName?: string; className?: string; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; }
+    extra?: { isMethod?: boolean; methodName?: string; className?: string; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; promiseValueType?: LLVMTypeRef; }
 };
 
-type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; };
+type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; promiseValueType?: LLVMTypeRef; };
 type CaptureEntry = { name: string; symbol: SymbolEntry; };
 
 class Scope {
@@ -85,6 +85,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 closureFunctionType: entry.closureFunctionType,
                 closureParamTypes: entry.closureParamTypes,
                 closureReturnType: entry.closureReturnType
+            } : entry.promiseValueType ? {
+                promiseValueType: entry.promiseValueType
             } : undefined
         };
     }
@@ -516,6 +518,19 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         };
     }
 
+    private emitClibReadFilePromise(pathArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const promiseType = this.llvmHelper.getLLVMType(new PromiseTypeAnnotation(new BasicTypeAnnotation(new Token(TokenType.STRING, 'string', null, 0, 0))));
+        const ft = LLVM.FunctionType(promiseType, this.toPtrArr([this.stringStructType]), 1, 0);
+        let readFilePromiseFn = LLVM.GetNamedFunction(this.module, 'yu_fs_readFilePromise');
+        if (!readFilePromiseFn) readFilePromiseFn = LLVM.AddFunction(this.module, 'yu_fs_readFilePromise', ft);
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, readFilePromiseFn, this.toPtrArr([pathArg.value]), 1, "read_file_promise"),
+            type: promiseType,
+            extra: { promiseValueType: this.stringStructType }
+        };
+    }
+
     private getClibFunctionType(name: string): LLVMTypeRef {
         const ctx = this.llvmHelper.getContext();
         const i8 = LLVM.Int8TypeInContext(ctx);
@@ -643,6 +658,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const i32 = LLVM.Int32TypeInContext(this.llvmHelper.getContext());
                 const main = LLVM.AddFunction(this.module, "main", LLVM.FunctionType(i32, this.toPtrArr([]), 0, 0));
                 LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(this.llvmHelper.getContext(), main, "entry"));
+                this.emitRuntimeInit();
+                LLVM.BuildRet(this.builder, LLVM.ConstInt(i32, 0n as any, 0));
             }
         });
         if (this.wrappedMainDeclaration) {
@@ -756,6 +773,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const pathArg = expr.args[0]!.accept(this) as IRValue;
                 const callbackArg = expr.args[1]!.accept(this) as IRValue;
                 return this.emitClibReadFileAsync(pathArg, callbackArg);
+            }
+            if (clibName === 'readFilePromise') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitClibReadFilePromise(pathArg);
             }
         }
 
@@ -994,6 +1015,20 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         throw new Error(`Unary operator ${e.operator.lexeme} not implemented.`);
     }
     visitGroupingExpr(e: GroupingExpr): IRValue { return e.expression.accept(this) as IRValue; }
+    visitAwaitExpr(e: AwaitExpr): IRValue {
+        const inner = e.expression.accept(this) as IRValue;
+        const promiseValueType = inner.extra?.promiseValueType ?? this.llvmHelper.getPromiseValueType(inner.type);
+        if (!promiseValueType) {
+            return inner;
+        }
+        const promiseStructType = this.llvmHelper.getPromiseStructType(inner.type);
+        if (!promiseStructType) {
+            return inner;
+        }
+        const valuePtr = LLVM.BuildStructGEP2(this.builder, promiseStructType, inner.value, 0, "promise_value_slot");
+        const value = LLVM.BuildLoad2(this.builder, promiseValueType, valuePtr, "await_value");
+        return { value, type: promiseValueType };
+    }
     visitAssignExpr(e: AssignExpr): IRValue {
         const target = e.target.accept(this) as IRValue;
         const value = e.value.accept(this) as IRValue;

@@ -1,6 +1,6 @@
 import { Token, TokenType } from '../token.js';
 import {
-    Expr, BinaryExpr, UnaryExpr, LiteralExpr, GroupingExpr, IdentifierExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, 
+    Expr, BinaryExpr, UnaryExpr, LiteralExpr, GroupingExpr, IdentifierExpr, CallExpr, GetExpr, AssignExpr, ThisExpr, AsExpr, AwaitExpr, ObjectLiteralExpr, NewExpr, DeleteExpr, 
     AddressOfExpr,
     DereferenceExpr, 
     TypeAnnotation,
@@ -168,6 +168,9 @@ export class ExpressionParser {
 
     // unary          → ( "!" | "-" | "&" | "*" | "delete" ) unary | call ;
     private unary(): Expr {
+        if (this.parser.match(TokenType.AWAIT)) {
+            return new AwaitExpr(this.unary());
+        }
         if (this.parser.match(TokenType.BANG, TokenType.MINUS, TokenType.AMPERSAND, TokenType.STAR)) {
             const operator = this.parser.previous();
             const right = this.unary();

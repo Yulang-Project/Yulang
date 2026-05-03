@@ -13,6 +13,7 @@ export interface ExprVisitor<R> {
     visitAssignExpr(expr: AssignExpr): R;
     visitThisExpr(expr: ThisExpr): R;
     visitAsExpr(expr: AsExpr): R; // NEW
+    visitAwaitExpr(expr: AwaitExpr): R;
     visitObjectLiteralExpr(expr: ObjectLiteralExpr): R; // NEW
     visitNewExpr(expr: NewExpr): R; // NEW
     visitDeleteExpr(expr: DeleteExpr): R; // NEW
@@ -117,6 +118,11 @@ export class AsExpr extends Expr {
     accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitAsExpr(this); }
 }
 
+export class AwaitExpr extends Expr {
+    constructor(public expression: Expr) { super(); }
+    accept<R>(visitor: ExprVisitor<R>): R { return visitor.visitAwaitExpr(this); }
+}
+
 // NEW: ObjectLiteralExpr for { key: value }
 export class ObjectLiteralExpr extends Expr {
     constructor(public properties: Map<Token, Expr>) { super(); } // Using Map for properties
@@ -176,6 +182,7 @@ export interface TypeAnnotationVisitor<R> {
     visitArrayTypeAnnotation(type: ArrayTypeAnnotation): R; // NEW
     visitPointerTypeAnnotation(type: PointerTypeAnnotation): R;
     visitFunctionTypeAnnotation(type: FunctionTypeAnnotation): R;
+    visitPromiseTypeAnnotation(type: PromiseTypeAnnotation): R;
 }
 
 export class BasicTypeAnnotation extends TypeAnnotation {
@@ -199,6 +206,11 @@ export class PointerTypeAnnotation extends TypeAnnotation {
 export class FunctionTypeAnnotation extends TypeAnnotation {
     constructor(public parameters: TypeAnnotation[], public returnType: TypeAnnotation) { super(); }
     accept<R>(visitor: TypeAnnotationVisitor<R>): R { return visitor.visitFunctionTypeAnnotation(this); }
+}
+
+export class PromiseTypeAnnotation extends TypeAnnotation {
+    constructor(public valueType: TypeAnnotation) { super(); }
+    accept<R>(visitor: TypeAnnotationVisitor<R>): R { return visitor.visitPromiseTypeAnnotation(this); }
 }
 export class LetStmt extends Stmt {
     constructor(public name: Token, public type: TypeAnnotation | null, public initializer: Expr | null, public isExported: boolean = false) { super(); }
@@ -326,6 +338,10 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
     visitAsExpr(expr: AsExpr): string {
         return this.parenthesize(`as ${this.printType(expr.type)}`, expr.expression);
     }
+
+    visitAwaitExpr(expr: AwaitExpr): string {
+        return this.parenthesize("await", expr.expression);
+    }
     
     // NEW: ObjectLiteralExpr for { key: value }
     visitObjectLiteralExpr(expr: ObjectLiteralExpr): string {
@@ -451,6 +467,10 @@ export class AstPrinter implements ExprVisitor<string>, StmtVisitor<string> {
         const params = type.parameters.map(p => this.printType(p)).join(", ");
         const returnType = this.printType(type.returnType);
         return `fun(${params})(${returnType})`;
+    }
+
+    visitPromiseTypeAnnotation(type: PromiseTypeAnnotation): string {
+        return `Promise<${this.printType(type.valueType)}>`;
     }
 
     printType(type: TypeAnnotation): string {

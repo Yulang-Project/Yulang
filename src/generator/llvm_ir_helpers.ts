@@ -1,6 +1,6 @@
 // src/generator/llvm_ir_helpers.ts
 
-import { ASTNode, BasicTypeAnnotation, ArrayTypeAnnotation, TypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation } from "../ast.js";
+import { ASTNode, BasicTypeAnnotation, ArrayTypeAnnotation, TypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation, PromiseTypeAnnotation } from "../ast.js";
 import { Token, TokenType } from "../token.js";
 import { resolveLangItemType } from "./builtins.js";
 import { LangItems } from "./lang_items.js";
@@ -27,6 +27,8 @@ export class LLVMIRHelper {
     private arrayElementTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
     private functionStructs: Map<string, LLVMTypeRef> = new Map();
     private closureFunctionTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
+    private promiseValueTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
+    private promiseStructTypes: Map<LLVMTypeRef, LLVMTypeRef> = new Map();
 
     constructor() {
         this.context = LLVM.ContextCreate();
@@ -122,6 +124,29 @@ export class LLVMIRHelper {
             this.functionStructs.set(key, closureType);
             this.closureFunctionTypes.set(closureType, funcType);
             return closureType;
+        }
+
+        if (typeAnnotation instanceof PromiseTypeAnnotation) {
+            const valueType = this.getLLVMType(typeAnnotation.valueType);
+            const key = `promise:${this.getTypeKey(typeAnnotation.valueType)}`;
+            const promiseStructKey = `${key}:struct`;
+            const existingPointer = this.namedStructs.get(key);
+            if (existingPointer) return existingPointer;
+            const existingStruct = this.namedStructs.get(promiseStructKey);
+            const promiseStructType = existingStruct ?? LLVM.StructCreateNamed(this.context, promiseStructKey);
+            if (!existingStruct) {
+                LLVM.StructSetBody(promiseStructType, [
+                    valueType,
+                    LLVM.Int32TypeInContext(this.context)
+                ], 2, 0);
+                this.namedStructs.set(promiseStructKey, promiseStructType);
+            }
+            const promiseType = LLVM.PointerType(promiseStructType, 0);
+            this.namedStructs.set(key, promiseType);
+            this.promiseValueTypes.set(promiseType, valueType);
+            this.promiseValueTypes.set(promiseStructType, valueType);
+            this.promiseStructTypes.set(promiseType, promiseStructType);
+            return promiseType;
         }
 
         if (typeAnnotation instanceof ArrayTypeAnnotation) {
@@ -220,6 +245,14 @@ export class LLVMIRHelper {
 
     public getClosureFunctionType(closureType: LLVMTypeRef): LLVMTypeRef | null {
         return this.closureFunctionTypes.get(closureType) || null;
+    }
+
+    public getPromiseValueType(promiseType: LLVMTypeRef): LLVMTypeRef | null {
+        return this.promiseValueTypes.get(promiseType) || null;
+    }
+
+    public getPromiseStructType(promiseType: LLVMTypeRef): LLVMTypeRef | null {
+        return this.promiseStructTypes.get(promiseType) || null;
     }
 
     private getTypeKey(typeAnnotation: TypeAnnotation | null): string {

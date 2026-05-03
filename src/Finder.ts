@@ -44,7 +44,7 @@ export class ProjectFinder implements IFinder {
 
     // 获取额外的链接器标志
     getLinkerFlags(osIdentifier: string, archIdentifier: string): string[] {
-        // Link the lightweight GC runtime and static libuv event loop runtime.
+        // Link the lightweight GC runtime and static libuv library.
         return ['-l:libgc.so.1', '/usr/lib/x86_64-linux-gnu/libuv.a', '-pthread', '-ldl', '-lrt', '-lc'];
     }
 }
