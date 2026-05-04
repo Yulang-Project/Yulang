@@ -132,6 +132,19 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return LLVM.BuildBitCast(this.builder, v.value, targetType, name);
     }
 
+    private coerceToBool(v: IRValue, name: string = ""): LLVMValueRef {
+        const ctx = this.llvmHelper.getContext();
+        const i1 = LLVM.Int1TypeInContext(ctx);
+        if (v.type === i1) return v.value;
+        if (this.isIntegerLikeType(v.type)) {
+            return LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntNE, v.value, LLVM.ConstInt(v.type, 0n as any, 0), name);
+        }
+        if (LLVM.GetTypeKind(v.type) === 12) {
+            return LLVM.BuildICmp(this.builder, LLVMIntPredicate.LLVMIntNE, v.value, LLVM.ConstPointerNull(v.type), name);
+        }
+        return v.value;
+    }
+
     private getGCInitFunction(): LLVMValueRef {
         const ctx = this.llvmHelper.getContext();
         const ft = LLVM.FunctionType(LLVM.VoidTypeInContext(ctx), this.toPtrArr([]), 0, 0);
@@ -168,9 +181,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         LLVM.BuildCall2(this.builder, uvInit.type, uvInit.fn, this.toPtrArr([]), 0, "");
     }
 
-    private emitUVRun() {
+    private emitUVRun(): LLVMValueRef {
         const uvRun = this.getUVRunFunction();
-        LLVM.BuildCall2(this.builder, uvRun.type, uvRun.fn, this.toPtrArr([]), 0, "");
+        return LLVM.BuildCall2(this.builder, uvRun.type, uvRun.fn, this.toPtrArr([]), 0, "");
     }
 
     private getGCMallocFunction(): { fn: LLVMValueRef; type: LLVMTypeRef } {
@@ -495,6 +508,40 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return { value: LLVM.BuildTrunc(this.builder, wrote, i32, 'wrote_i32'), type: i32 };
     }
 
+    private emitUVReadFileSync(pathArg: IRValue): IRValue {
+        const ft = LLVM.FunctionType(this.stringStructType, this.toPtrArr([this.stringStructType]), 1, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_readFileSync');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_readFileSync', ft);
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([pathArg.value]), 1, "uv_read_file_sync"),
+            type: this.stringStructType
+        };
+    }
+
+    private emitUVWriteFileSync(pathArg: IRValue, contentArg: IRValue, append: boolean): IRValue {
+        const i32 = LLVM.Int32TypeInContext(this.llvmHelper.getContext());
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([this.stringStructType, this.stringStructType]), 2, 0);
+        const name = append ? 'yu_uv_appendFileSync' : 'yu_uv_writeFileSync';
+        let fn = LLVM.GetNamedFunction(this.module, name);
+        if (!fn) fn = LLVM.AddFunction(this.module, name, ft);
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([pathArg.value, contentArg.value]), 2, append ? "uv_append_file_sync" : "uv_write_file_sync"),
+            type: i32
+        };
+    }
+
+    private emitUVStatusPathCall(name: string, args: IRValue[]): IRValue {
+        const i32 = LLVM.Int32TypeInContext(this.llvmHelper.getContext());
+        const paramTypes = args.map(arg => arg.type);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr(paramTypes), paramTypes.length, 0);
+        let fn = LLVM.GetNamedFunction(this.module, name);
+        if (!fn) fn = LLVM.AddFunction(this.module, name, ft);
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr(args.map(arg => arg.value)), args.length, name.replace(/^yu_/, "")),
+            type: i32
+        };
+    }
+
     private emitClibReadFileAsync(pathArg: IRValue, callbackArg: IRValue): IRValue {
         const ctx = this.llvmHelper.getContext();
         const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
@@ -515,19 +562,6 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         return {
             value: LLVM.BuildCall2(this.builder, ft, readFileFn, this.toPtrArr([pathArg.value, codeAsPtr, envPtr]), 3, "read_file_status"),
             type: i32
-        };
-    }
-
-    private emitClibReadFilePromise(pathArg: IRValue): IRValue {
-        const ctx = this.llvmHelper.getContext();
-        const promiseType = this.llvmHelper.getLLVMType(new PromiseTypeAnnotation(new BasicTypeAnnotation(new Token(TokenType.STRING, 'string', null, 0, 0))));
-        const ft = LLVM.FunctionType(promiseType, this.toPtrArr([this.stringStructType]), 1, 0);
-        let readFilePromiseFn = LLVM.GetNamedFunction(this.module, 'yu_fs_readFilePromise');
-        if (!readFilePromiseFn) readFilePromiseFn = LLVM.AddFunction(this.module, 'yu_fs_readFilePromise', ft);
-        return {
-            value: LLVM.BuildCall2(this.builder, ft, readFilePromiseFn, this.toPtrArr([pathArg.value]), 1, "read_file_promise"),
-            type: promiseType,
-            extra: { promiseValueType: this.stringStructType }
         };
     }
 
@@ -774,9 +808,51 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const callbackArg = expr.args[1]!.accept(this) as IRValue;
                 return this.emitClibReadFileAsync(pathArg, callbackArg);
             }
-            if (clibName === 'readFilePromise') {
+        }
+
+        if (expr.callee instanceof GetExpr && expr.callee.object instanceof IdentifierExpr && expr.callee.object.name.lexeme === 'uv') {
+            const uvName = expr.callee.name.lexeme;
+            if (uvName === 'readFileSync') {
                 const pathArg = expr.args[0]!.accept(this) as IRValue;
-                return this.emitClibReadFilePromise(pathArg);
+                return this.emitUVReadFileSync(pathArg);
+            }
+            if (uvName === 'writeFileSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const contentArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVWriteFileSync(pathArg, contentArg, false);
+            }
+            if (uvName === 'appendFileSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const contentArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVWriteFileSync(pathArg, contentArg, true);
+            }
+            if (uvName === 'readFile') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const callbackArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitClibReadFileAsync(pathArg, callbackArg);
+            }
+            if (uvName === 'accessSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const modeArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_accessSync', [pathArg, { ...modeArg, value: this.coerceToType(modeArg, LLVM.Int32TypeInContext(ctx), "access_mode_i32"), type: LLVM.Int32TypeInContext(ctx) }]);
+            }
+            if (uvName === 'unlinkSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_unlinkSync', [pathArg]);
+            }
+            if (uvName === 'renameSync') {
+                const oldPathArg = expr.args[0]!.accept(this) as IRValue;
+                const newPathArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_renameSync', [oldPathArg, newPathArg]);
+            }
+            if (uvName === 'mkdirSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                const modeArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_mkdirSync', [pathArg, { ...modeArg, value: this.coerceToType(modeArg, LLVM.Int32TypeInContext(ctx), "mkdir_mode_i32"), type: LLVM.Int32TypeInContext(ctx) }]);
+            }
+            if (uvName === 'rmdirSync') {
+                const pathArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_rmdirSync', [pathArg]);
             }
         }
 
@@ -831,9 +907,10 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 const paramType = paramTypes[i];
                 return paramType ? this.coerceToType(arg, paramType, "closure_arg_cast") : arg.value;
             })];
+            const returnType = callee.extra?.closureReturnType ?? LLVM.GetReturnType(closureFunctionType);
             return {
-                value: LLVM.BuildCall2(this.builder, closureFunctionType, codePtr, this.toPtrArr(args), args.length, "closure_call"),
-                type: callee.extra?.closureReturnType ?? LLVM.GetReturnType(closureFunctionType)
+                value: LLVM.BuildCall2(this.builder, closureFunctionType, codePtr, this.toPtrArr(args), args.length, LLVM.GetTypeKind(returnType) === 0 ? "" : "closure_call"),
+                type: returnType
             };
         }
         const ft = callee.pointeeType; if (!ft) throw new Error("Missing function type");
@@ -1025,6 +1102,35 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         if (!promiseStructType) {
             return inner;
         }
+
+        const ctx = this.llvmHelper.getContext();
+        const functionPtr = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
+        const checkBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "await_check");
+        const runBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "await_run");
+        const doneBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "await_done");
+        const resolvedIndex = LLVM.GetTypeKind(promiseValueType) === 0 ? 0 : 1;
+        const resolvedPtr = LLVM.BuildStructGEP2(this.builder, promiseStructType, inner.value, resolvedIndex, "await_resolved_slot");
+
+        LLVM.BuildBr(this.builder, checkBB);
+        LLVM.PositionBuilderAtEnd(this.builder, checkBB);
+        const resolved = LLVM.BuildLoad2(this.builder, LLVM.Int32TypeInContext(ctx), resolvedPtr, "await_resolved");
+        const isResolved = LLVM.BuildICmp(
+            this.builder,
+            LLVMIntPredicate.LLVMIntNE,
+            resolved,
+            LLVM.ConstInt(LLVM.Int32TypeInContext(ctx), 0n as any, 0),
+            "await_is_resolved"
+        );
+        LLVM.BuildCondBr(this.builder, isResolved, doneBB, runBB);
+
+        LLVM.PositionBuilderAtEnd(this.builder, runBB);
+        this.emitUVRun();
+        LLVM.BuildBr(this.builder, checkBB);
+
+        LLVM.PositionBuilderAtEnd(this.builder, doneBB);
+        if (LLVM.GetTypeKind(promiseValueType) === 0) {
+            return inner;
+        }
         const valuePtr = LLVM.BuildStructGEP2(this.builder, promiseStructType, inner.value, 0, "promise_value_slot");
         const value = LLVM.BuildLoad2(this.builder, promiseValueType, valuePtr, "await_value");
         return { value, type: promiseValueType };
@@ -1052,6 +1158,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     }
     visitNewExpr(e: NewExpr): IRValue {
         const ctx = this.llvmHelper.getContext();
+        if (e.callee instanceof IdentifierExpr && e.callee.name.lexeme === 'Promise') {
+            return this.emitNewPromise(e);
+        }
         if (!(e.callee instanceof IdentifierExpr)) throw new Error("New expression must call a class name");
         const className = e.callee.name.lexeme;
         const classDecl = this.classes.get(className);
@@ -1079,6 +1188,90 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
 
         return { value: objPtr, type: LLVM.PointerType(structType, 0), pointeeType: structType };
+    }
+
+    private emitNewPromise(e: NewExpr): IRValue {
+        if (e.args.length !== 1 || !(e.args[0] instanceof FunctionLiteralExpr)) {
+            throw new Error("Promise constructor expects an executor function.");
+        }
+
+        const ctx = this.llvmHelper.getContext();
+        const executor = e.args[0];
+        const resolveParam = executor.parameters[0];
+        const valueType = resolveParam?.type instanceof FunctionTypeAnnotation
+            ? this.llvmHelper.getLLVMType(resolveParam.type.parameters[0] ?? null)
+            : LLVM.VoidTypeInContext(ctx);
+        const promiseType = this.llvmHelper.ensurePromiseType(valueType, this.getLLVMTypeKey(valueType));
+        const promiseStructType = this.llvmHelper.getPromiseStructType(promiseType);
+        if (!promiseStructType) throw new Error("Missing Promise struct type.");
+
+        const promiseRaw = this.buildGCMalloc(LLVM.SizeOf(promiseStructType), "promise_raw");
+        const promisePtr = LLVM.BuildBitCast(this.builder, promiseRaw, promiseType, "promise");
+        const resolvedIndex = LLVM.GetTypeKind(valueType) === 0 ? 0 : 1;
+        LLVM.BuildStore(
+            this.builder,
+            LLVM.ConstInt(LLVM.Int32TypeInContext(ctx), 0n as any, 0),
+            LLVM.BuildStructGEP2(this.builder, promiseStructType, promisePtr, resolvedIndex, "promise_resolved_slot")
+        );
+
+        const resolveClosure = this.buildPromiseResolverClosure(promiseType, promisePtr, valueType, false);
+        const rejectType = executor.parameters[1]?.type instanceof FunctionTypeAnnotation
+            ? this.llvmHelper.getLLVMType(executor.parameters[1]!.type.parameters[0] ?? null)
+            : LLVM.Int32TypeInContext(ctx);
+        const rejectClosure = this.buildPromiseResolverClosure(promiseType, promisePtr, rejectType, true);
+        const executorValue = executor.accept(this) as IRValue;
+        const executorFnType = executorValue.extra?.closureFunctionType ?? this.llvmHelper.getClosureFunctionType(executorValue.type);
+        if (!executorFnType) throw new Error("Missing Promise executor function type.");
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const executorPtr = executorValue.address ?? LLVM.BuildAlloca(this.builder, executorValue.type, "promise_executor_tmp");
+        if (!executorValue.address) LLVM.BuildStore(this.builder, executorValue.value, executorPtr);
+        const codePtrType = LLVM.StructGetTypeAtIndex(executorValue.type, 0);
+        const codePtr = LLVM.BuildLoad2(this.builder, codePtrType, LLVM.BuildStructGEP2(this.builder, executorValue.type, executorPtr, 0, "promise_executor_code_slot"), "promise_executor_code");
+        const envPtr = LLVM.BuildLoad2(this.builder, i8Ptr, LLVM.BuildStructGEP2(this.builder, executorValue.type, executorPtr, 1, "promise_executor_env_slot"), "promise_executor_env");
+        LLVM.BuildCall2(this.builder, executorFnType, codePtr, this.toPtrArr([envPtr, resolveClosure.value, rejectClosure.value]), 3, "");
+
+        return { value: promisePtr, type: promiseType, extra: { promiseValueType: valueType } };
+    }
+
+    private buildPromiseResolverClosure(promiseType: LLVMTypeRef, promiseValue: LLVMValueRef, valueType: LLVMTypeRef, reject: boolean): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const voidType = LLVM.VoidTypeInContext(ctx);
+        const hasValue = !reject && LLVM.GetTypeKind(valueType) !== 0;
+        const paramTypes = reject
+            ? (LLVM.GetTypeKind(valueType) === 0 ? [] : [valueType])
+            : (hasValue ? [valueType] : []);
+        const fnType = LLVM.FunctionType(voidType, this.toPtrArr([i8Ptr, ...paramTypes]), paramTypes.length + 1, 0);
+        const fn = LLVM.AddFunction(this.module, reject ? `yu_promise_reject_${this.labelCounter++}` : `yu_promise_resolve_${this.labelCounter++}`, fnType);
+        const closureStructType = LLVM.StructTypeInContext(ctx, this.toPtrArr([LLVM.PointerType(fnType, 0), i8Ptr]), 2, 0);
+        const promiseStructType = this.llvmHelper.getPromiseStructType(promiseType);
+        if (!promiseStructType) throw new Error("Missing Promise struct type.");
+
+        const closurePtr = LLVM.BuildAlloca(this.builder, closureStructType, reject ? "reject_closure" : "resolve_closure");
+        LLVM.BuildStore(this.builder, fn, LLVM.BuildStructGEP2(this.builder, closureStructType, closurePtr, 0, ""));
+        LLVM.BuildStore(this.builder, LLVM.BuildBitCast(this.builder, promiseValue, i8Ptr, ""), LLVM.BuildStructGEP2(this.builder, closureStructType, closurePtr, 1, ""));
+
+        const oldBlock = LLVM.GetInsertBlock(this.builder);
+        LLVM.PositionBuilderAtEnd(this.builder, LLVM.AppendBasicBlockInContext(ctx, fn, "entry"));
+        const promisePtr = LLVM.BuildBitCast(this.builder, LLVM.GetParam(fn, 0), promiseType, "promise");
+        const resolvedIndex = LLVM.GetTypeKind(this.llvmHelper.getPromiseValueType(promiseType) ?? voidType) === 0 ? 0 : 1;
+        if (hasValue) {
+            LLVM.BuildStore(this.builder, LLVM.GetParam(fn, 1), LLVM.BuildStructGEP2(this.builder, promiseStructType, promisePtr, 0, "promise_value_slot"));
+        }
+        LLVM.BuildStore(this.builder, LLVM.ConstInt(LLVM.Int32TypeInContext(ctx), 1n as any, 0), LLVM.BuildStructGEP2(this.builder, promiseStructType, promisePtr, resolvedIndex, "promise_resolved_slot"));
+        LLVM.BuildRetVoid(this.builder);
+        LLVM.PositionBuilderAtEnd(this.builder, oldBlock);
+
+        const value = LLVM.BuildLoad2(this.builder, closureStructType, closurePtr, "");
+        return { value, type: closureStructType, address: closurePtr, extra: { closureFunctionType: fnType, closureParamTypes: paramTypes, closureReturnType: voidType } };
+    }
+
+    private getLLVMTypeKey(type: LLVMTypeRef): string {
+        const ctx = this.llvmHelper.getContext();
+        if (type === this.stringStructType) return 'basic:string';
+        if (type === LLVM.Int32TypeInContext(ctx)) return 'basic:i32';
+        if (LLVM.GetTypeKind(type) === 0) return 'basic:void';
+        return `kind:${LLVM.GetTypeKind(type)}`;
     }
     visitDeleteExpr(e: DeleteExpr): IRValue { throw 0; }
     visitAddressOfExpr(e: AddressOfExpr): IRValue { throw 0; }
@@ -1163,7 +1356,8 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
     visitConstStmt(s: ConstStmt) {}
     visitIfStmt(s: IfStmt) {
         const ctx = this.llvmHelper.getContext();
-        const condition = (s.condition.accept(this) as IRValue).value;
+        const conditionValue = s.condition.accept(this) as IRValue;
+        const condition = this.coerceToBool(conditionValue, "if_cond");
         const functionPtr = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(this.builder));
 
         const thenBB = LLVM.AppendBasicBlockInContext(ctx, functionPtr, "then");
@@ -1203,7 +1397,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
 
         // Condition block
         LLVM.PositionBuilderAtEnd(this.builder, condBB);
-        const condition = (s.condition.accept(this) as IRValue).value;
+        const condition = this.coerceToBool(s.condition.accept(this) as IRValue, "while_cond");
         LLVM.BuildCondBr(this.builder, condition, bodyBB, endBB);
 
         // Body block

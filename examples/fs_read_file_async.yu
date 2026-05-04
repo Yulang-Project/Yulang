@@ -1,7 +1,7 @@
-import { readFile, write_text } from "std:fs";
+import { readFile, writeFileSync } from "std:fs";
 
 export function main(): i32 {
-    write_text("/tmp/yu_fs_read_file_async.txt", "hello from libuv readFile");
+    writeFileSync("/tmp/yu_fs_read_file_async.txt", "hello from libuv readFile");
 
     readFile("/tmp/yu_fs_read_file_async.txt", (err: i32, data: string): void => {
         clib.printf("readFile err: %d\n", err);

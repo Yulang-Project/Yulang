@@ -1,51 +1,96 @@
 import * as uv from "std:uv";
 
-export function writeFile(path: string, content: string): i32 {
-    return uv.uv_writefile(path, content);
-}
-
-export function appendFile(path: string, content: string): i32 {
-    return uv.uv_appendfile(path, content);
+export function readFile(path: string, callback: (err: i32, data: string) => void): void {
+    uv.readFile(path, callback);
 }
 
 export function readFileSync(path: string): string {
-    return uv.uv_read_text(path);
+    return uv.readFileSync(path);
 }
 
-export function readFile(path: string, callback: (err: i32, data: string) => void): void {
-    uv.uv_readFile(path, callback);
+export function writeFile(path: string, data: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.writeFileSync(path, data);
+    callback(status);
 }
 
-export function unlink(path: string): i32 {
-    return uv.uv_unlink(path);
+export function writeFileSync(path: string, data: string): void {
+    uv.writeFileSync(path, data);
 }
 
-export function rename(oldPath: string, newPath: string): i32 {
-    return uv.uv_rename(oldPath, newPath);
+export function appendFile(path: string, data: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.appendFileSync(path, data);
+    callback(status);
 }
 
-export function mkdir(path: string, mode: i32): i32 {
-    return uv.uv_mkdir(path, mode);
+export function appendFileSync(path: string, data: string): void {
+    uv.appendFileSync(path, data);
 }
 
-export function rmdir(path: string): i32 {
-    return uv.uv_rmdir(path);
+export function unlink(path: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.unlinkSync(path);
+    callback(status);
 }
 
-export function access(path: string, mode: i32): i32 {
-    return uv.uv_access(path, mode);
+export function unlinkSync(path: string): void {
+    uv.unlinkSync(path);
 }
 
-export function exists(path: string): i32 {
-    return uv.uv_access(path, 0);
+export function rename(oldPath: string, newPath: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.renameSync(oldPath, newPath);
+    callback(status);
 }
 
-// Legacy aliases.
-export function write_text(path: string, content: string): i32 { return uv.uv_writefile(path, content); }
-export function append_text(path: string, content: string): i32 { return uv.uv_appendfile(path, content); }
-export function read_text(path: string): string { return uv.uv_read_text(path); }
-export function remove_file(path: string): i32 { return uv.uv_unlink(path); }
-export function rename_file(oldPath: string, newPath: string): i32 { return uv.uv_rename(oldPath, newPath); }
-export function make_dir(path: string, mode: i32): i32 { return uv.uv_mkdir(path, mode); }
-export function remove_dir(path: string): i32 { return uv.uv_rmdir(path); }
-export function file_exists(path: string): i32 { return uv.uv_access(path, 0); }
+export function renameSync(oldPath: string, newPath: string): void {
+    uv.renameSync(oldPath, newPath);
+}
+
+export function mkdir(path: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.mkdirSync(path, 493);
+    callback(status);
+}
+
+export function mkdirSync(path: string): void {
+    uv.mkdirSync(path, 493);
+}
+
+export function rmdir(path: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.rmdirSync(path);
+    callback(status);
+}
+
+export function rmdirSync(path: string): void {
+    uv.rmdirSync(path);
+}
+
+export function access(path: string, callback: (err: i32) => void): void {
+    let status: i32 = uv.accessSync(path, 0);
+    callback(status);
+}
+
+export function accessSync(path: string): void {
+    uv.accessSync(path, 0);
+}
+
+export function existsSync(path: string): bool {
+    let ok: i32 = 0;
+    return uv.accessSync(path, 0) == ok;
+}
+
+export function rm(path: string, callback: (err: i32) => void): void {
+    unlink(path, callback);
+}
+
+export function rmSync(path: string): void {
+    unlinkSync(path);
+}
+
+export function copyFile(src: string, dest: string, callback: (err: i32) => void): void {
+    let data: string = uv.readFileSync(src);
+    let status: i32 = uv.writeFileSync(dest, data);
+    callback(status);
+}
+
+export function copyFileSync(src: string, dest: string): void {
+    let data: string = uv.readFileSync(src);
+    uv.writeFileSync(dest, data);
+}

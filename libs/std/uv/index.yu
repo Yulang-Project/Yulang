@@ -1,39 +1,35 @@
-export function uv_read_text(path: string): string {
-    return clib.readfile(path);
+export function readFileSync(path: string): string {
+    return uv.readFileSync(path);
 }
 
-export function uv_readFile(path: string, callback: (err: i32, data: string) => void): void {
-    clib.readFile(path, callback);
+export function readFile(path: string, callback: (err: i32, data: string) => void): void {
+    uv.readFile(path, callback);
 }
 
-export function uv_readFilePromise(path: string): Promise<string> {
-    return clib.readFilePromise(path);
+export function writeFileSync(path: string, content: string): i32 {
+    return uv.writeFileSync(path, content);
 }
 
-export function uv_writefile(path: string, content: string): i32 {
-    return clib.writefile(path, content);
+export function appendFileSync(path: string, content: string): i32 {
+    return uv.appendFileSync(path, content);
 }
 
-export function uv_appendfile(path: string, content: string): i32 {
-    return clib.appendfile(path, content);
+export function unlinkSync(path: string): i32 {
+    return uv.unlinkSync(path);
 }
 
-export function uv_unlink(path: string): i32 {
-    return clib.unlink(path);
+export function renameSync(oldPath: string, newPath: string): i32 {
+    return uv.renameSync(oldPath, newPath);
 }
 
-export function uv_rename(oldPath: string, newPath: string): i32 {
-    return clib.rename(oldPath, newPath);
+export function mkdirSync(path: string, mode: i32): i32 {
+    return uv.mkdirSync(path, mode);
 }
 
-export function uv_mkdir(path: string, mode: i32): i32 {
-    return clib.mkdir(path, mode);
+export function rmdirSync(path: string): i32 {
+    return uv.rmdirSync(path);
 }
 
-export function uv_rmdir(path: string): i32 {
-    return clib.rmdir(path);
-}
-
-export function uv_access(path: string, mode: i32): i32 {
-    return clib.access(path, mode);
+export function accessSync(path: string, mode: i32): i32 {
+    return uv.accessSync(path, mode);
 }

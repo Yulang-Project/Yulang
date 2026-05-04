@@ -1,0 +1,11 @@
+import { readFile, writeFile, appendFile } from "std:fs/promises";
+
+export function main(): i32 {
+    await writeFile("/tmp/yu_fs_promises_write_file.txt", "hello");
+    await appendFile("/tmp/yu_fs_promises_write_file.txt", "\nfrom promises");
+
+    let data: string = await readFile("/tmp/yu_fs_promises_write_file.txt");
+    clib.printf("fs promises write data: %s\n", data.ptr);
+
+    return 0;
+}

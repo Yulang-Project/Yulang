@@ -159,10 +159,11 @@ export class DeclarationParser {
         }
 
         if (importStmt.namespaceAlias) {
+            const prefix = this.getModuleSymbolPrefix(modulePath);
             this.parser.namespaceImports.set(importStmt.namespaceAlias.lexeme, new Map(
-                Array.from(exportedMap.keys()).map((name) => [name, name])
+                Array.from(exportedMap.keys()).map((name) => [name, `${prefix}_${name}`])
             ));
-            return this.cloneImportedDeclarations(Array.from(exportedMap.values()));
+            return this.cloneImportedDeclarations(Array.from(exportedMap.values()), prefix);
         }
 
         if (importStmt.namedImports && importStmt.namedImports.length > 0) {
@@ -276,9 +277,22 @@ export class DeclarationParser {
         return dependencies;
     }
 
-    private cloneImportedDeclarations(statements: Stmt[]): Stmt[] {
+    private getModuleSymbolPrefix(modulePath: string): string {
+        return modulePath.replace(/[^A-Za-z0-9_]/g, '_');
+    }
+
+    private cloneImportedDeclarations(statements: Stmt[], renamePrefix: string | null = null): Stmt[] {
         return statements.map((statement) => {
             const cloned = Object.assign(Object.create(Object.getPrototypeOf(statement)), statement) as Stmt;
+            if (renamePrefix && cloned instanceof FunctionDeclaration) {
+                cloned.name = new Token(
+                    cloned.name.type,
+                    `${renamePrefix}_${cloned.name.lexeme}`,
+                    cloned.name.literal,
+                    cloned.name.line,
+                    cloned.name.column
+                );
+            }
             if (cloned instanceof FunctionDeclaration
                 || cloned instanceof LetStmt
                 || cloned instanceof ConstStmt

@@ -64,6 +64,7 @@ export const LLVM = {
     FunctionType: lib.func('LLVMFunctionType', LLVMTypeRef_t, [LLVMTypeRef_t, koffi.pointer(LLVMTypeRef_t), 'uint32', 'int']),
     AppendBasicBlockInContext: lib.func('LLVMAppendBasicBlockInContext', LLVMBasicBlockRef_t, [LLVMContextRef_t, LLVMValueRef_t, 'string']),
     GetBasicBlockParent: lib.func('LLVMGetBasicBlockParent', LLVMValueRef_t, [LLVMBasicBlockRef_t]),
+    GetBasicBlockTerminator: lib.func('LLVMGetBasicBlockTerminator', LLVMValueRef_t, [LLVMBasicBlockRef_t]),
     GetParam: lib.func('LLVMGetParam', LLVMValueRef_t, [LLVMValueRef_t, 'uint32']),
 
     // 指令构建 - 算术

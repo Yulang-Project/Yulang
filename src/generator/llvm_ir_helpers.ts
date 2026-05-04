@@ -135,10 +135,16 @@ export class LLVMIRHelper {
             const existingStruct = this.namedStructs.get(promiseStructKey);
             const promiseStructType = existingStruct ?? LLVM.StructCreateNamed(this.context, promiseStructKey);
             if (!existingStruct) {
-                LLVM.StructSetBody(promiseStructType, [
-                    valueType,
-                    LLVM.Int32TypeInContext(this.context)
-                ], 2, 0);
+                if (LLVM.GetTypeKind(valueType) === 0) {
+                    LLVM.StructSetBody(promiseStructType, [
+                        LLVM.Int32TypeInContext(this.context)
+                    ], 1, 0);
+                } else {
+                    LLVM.StructSetBody(promiseStructType, [
+                        valueType,
+                        LLVM.Int32TypeInContext(this.context)
+                    ], 2, 0);
+                }
                 this.namedStructs.set(promiseStructKey, promiseStructType);
             }
             const promiseType = LLVM.PointerType(promiseStructType, 0);
@@ -253,6 +259,31 @@ export class LLVMIRHelper {
 
     public getPromiseStructType(promiseType: LLVMTypeRef): LLVMTypeRef | null {
         return this.promiseStructTypes.get(promiseType) || null;
+    }
+
+    public ensurePromiseType(valueType: LLVMTypeRef, key: string): LLVMTypeRef {
+        const promiseKey = `promise:${key}`;
+        const promiseStructKey = `${promiseKey}:struct`;
+        const existingPointer = this.namedStructs.get(promiseKey);
+        if (existingPointer) return existingPointer;
+        const promiseStructType = LLVM.StructCreateNamed(this.context, promiseStructKey);
+        if (LLVM.GetTypeKind(valueType) === 0) {
+            LLVM.StructSetBody(promiseStructType, [
+                LLVM.Int32TypeInContext(this.context)
+            ], 1, 0);
+        } else {
+            LLVM.StructSetBody(promiseStructType, [
+                valueType,
+                LLVM.Int32TypeInContext(this.context)
+            ], 2, 0);
+        }
+        this.namedStructs.set(promiseStructKey, promiseStructType);
+        const promiseType = LLVM.PointerType(promiseStructType, 0);
+        this.namedStructs.set(promiseKey, promiseType);
+        this.promiseValueTypes.set(promiseType, valueType);
+        this.promiseValueTypes.set(promiseStructType, valueType);
+        this.promiseStructTypes.set(promiseType, promiseStructType);
+        return promiseType;
     }
 
     private getTypeKey(typeAnnotation: TypeAnnotation | null): string {

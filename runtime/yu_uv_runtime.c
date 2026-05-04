@@ -17,6 +17,10 @@ typedef struct {
 
 typedef void (*yu_read_file_cb)(void *env, int32_t err, yu_string data);
 
+typedef struct {
+    yu_string_promise *promise;
+} yu_read_sync_ctx;
+
 typedef struct yu_read_file_req {
     uv_fs_t open_req;
     uv_fs_t stat_req;
@@ -169,31 +173,130 @@ int32_t yu_fs_readFile(yu_string path, void *code, void *env) {
     return 0;
 }
 
-typedef struct {
-    yu_string_promise *promise;
-} yu_promise_read_ctx;
+static int32_t yu_write_file_sync(yu_string path, yu_string data, const char *mode) {
+    char *path_buf = (char *)malloc((size_t)path.length + 1);
+    if (!path_buf) return -ENOMEM;
+    memcpy(path_buf, path.ptr, (size_t)path.length);
+    path_buf[path.length] = '\0';
 
-static void yu_promise_read_cb(void *env, int32_t err, yu_string data) {
-    yu_promise_read_ctx *ctx = (yu_promise_read_ctx *)env;
+    uv_fs_t open_req;
+    int flags = O_WRONLY | O_CREAT;
+    if (mode[0] == 'a') flags |= O_APPEND;
+    else flags |= O_TRUNC;
+
+    int rc = uv_fs_open(uv_default_loop(), &open_req, path_buf, flags, 0666, NULL);
+    uv_fs_req_cleanup(&open_req);
+    free(path_buf);
+    if (rc < 0) return rc;
+
+    uv_file file = (uv_file)rc;
+    uv_buf_t buf = uv_buf_init(data.ptr, (unsigned int)data.length);
+    uv_fs_t write_req;
+    rc = uv_fs_write(uv_default_loop(), &write_req, file, &buf, 1, -1, NULL);
+    uv_fs_req_cleanup(&write_req);
+
+    uv_fs_t close_req;
+    int close_rc = uv_fs_close(uv_default_loop(), &close_req, file, NULL);
+    uv_fs_req_cleanup(&close_req);
+
+    if (rc < 0) return rc;
+    if (close_rc < 0) return close_rc;
+    return rc;
+}
+
+static void yu_read_sync_cb(void *env, int32_t err, yu_string data) {
+    yu_read_sync_ctx *ctx = (yu_read_sync_ctx *)env;
     ctx->promise->value = err == 0 ? data : (yu_string){ yu_empty_string, 0 };
     ctx->promise->resolved = 1;
 }
 
-yu_string_promise *yu_fs_readFilePromise(yu_string path) {
-    yu_string_promise *promise = (yu_string_promise *)GC_malloc(sizeof(yu_string_promise));
-    promise->value.ptr = yu_empty_string;
-    promise->value.length = 0;
-    promise->resolved = 0;
+yu_string yu_uv_readFileSync(yu_string path) {
+    yu_string_promise promise;
+    promise.value.ptr = yu_empty_string;
+    promise.value.length = 0;
+    promise.resolved = 0;
 
-    yu_promise_read_ctx *ctx = (yu_promise_read_ctx *)GC_malloc(sizeof(yu_promise_read_ctx));
-    ctx->promise = promise;
-    int rc = yu_fs_readFile(path, (void *)yu_promise_read_cb, ctx);
+    yu_read_sync_ctx ctx;
+    ctx.promise = &promise;
+    int rc = yu_fs_readFile(path, (void *)yu_read_sync_cb, &ctx);
     if (rc < 0) {
-        promise->resolved = 1;
+        promise.resolved = 1;
     } else {
-        while (!promise->resolved) {
+        while (!promise.resolved) {
             uv_run(uv_default_loop(), UV_RUN_DEFAULT);
         }
     }
-    return promise;
+    return promise.value;
+}
+
+int32_t yu_uv_writeFileSync(yu_string path, yu_string data) {
+    return yu_write_file_sync(path, data, "w");
+}
+
+int32_t yu_uv_appendFileSync(yu_string path, yu_string data) {
+    return yu_write_file_sync(path, data, "a");
+}
+
+static char *yu_c_path_from_string(yu_string path) {
+    char *path_buf = (char *)malloc((size_t)path.length + 1);
+    if (!path_buf) return NULL;
+    memcpy(path_buf, path.ptr, (size_t)path.length);
+    path_buf[path.length] = '\0';
+    return path_buf;
+}
+
+int32_t yu_uv_accessSync(yu_string path, int32_t mode) {
+    char *path_buf = yu_c_path_from_string(path);
+    if (!path_buf) return -ENOMEM;
+    uv_fs_t req;
+    int rc = uv_fs_access(uv_default_loop(), &req, path_buf, mode, NULL);
+    uv_fs_req_cleanup(&req);
+    free(path_buf);
+    return rc;
+}
+
+int32_t yu_uv_unlinkSync(yu_string path) {
+    char *path_buf = yu_c_path_from_string(path);
+    if (!path_buf) return -ENOMEM;
+    uv_fs_t req;
+    int rc = uv_fs_unlink(uv_default_loop(), &req, path_buf, NULL);
+    uv_fs_req_cleanup(&req);
+    free(path_buf);
+    return rc;
+}
+
+int32_t yu_uv_renameSync(yu_string old_path, yu_string new_path) {
+    char *old_buf = yu_c_path_from_string(old_path);
+    char *new_buf = yu_c_path_from_string(new_path);
+    if (!old_buf || !new_buf) {
+        free(old_buf);
+        free(new_buf);
+        return -ENOMEM;
+    }
+    uv_fs_t req;
+    int rc = uv_fs_rename(uv_default_loop(), &req, old_buf, new_buf, NULL);
+    uv_fs_req_cleanup(&req);
+    free(old_buf);
+    free(new_buf);
+    return rc;
+}
+
+int32_t yu_uv_mkdirSync(yu_string path, int32_t mode) {
+    char *path_buf = yu_c_path_from_string(path);
+    if (!path_buf) return -ENOMEM;
+    uv_fs_t req;
+    int rc = uv_fs_mkdir(uv_default_loop(), &req, path_buf, mode, NULL);
+    uv_fs_req_cleanup(&req);
+    free(path_buf);
+    return rc;
+}
+
+int32_t yu_uv_rmdirSync(yu_string path) {
+    char *path_buf = yu_c_path_from_string(path);
+    if (!path_buf) return -ENOMEM;
+    uv_fs_t req;
+    int rc = uv_fs_rmdir(uv_default_loop(), &req, path_buf, NULL);
+    uv_fs_req_cleanup(&req);
+    free(path_buf);
+    return rc;
 }

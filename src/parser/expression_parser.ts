@@ -196,6 +196,10 @@ export class ExpressionParser {
         if (this.parser.match(TokenType.NEW)) {
             // Parse class reference with optional dotted path, then ctor args
             let callee = this.primary();
+            if (callee instanceof IdentifierExpr && callee.name.lexeme === 'Promise' && this.parser.match(TokenType.LT)) {
+                this.parser.typeAnnotation();
+                this.parser.consume(TokenType.GT, "Expect '>' after Promise type argument.");
+            }
             while (this.parser.match(TokenType.DOT)) {
                 const name = this.parser.consume(TokenType.IDENTIFIER, "Expect property name after '.'.");
                 callee = new GetExpr(callee, name);
@@ -322,7 +326,7 @@ export class ExpressionParser {
             return new LiteralExpr(false);
         }
 
-        if (this.parser.match(TokenType.IDENTIFIER)) {
+        if (this.parser.match(TokenType.IDENTIFIER, TokenType.PROMISE)) {
             return new IdentifierExpr(this.parser.previous());
         }
 

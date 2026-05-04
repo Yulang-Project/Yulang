@@ -1,5 +1,35 @@
 import * as uv from "std:uv";
 
 export function readFile(path: string): Promise<string> {
-    return uv.uv_readFilePromise(path);
+    return new Promise<string>((resolve: (value: string) => void, reject: (err: i32) => void): void => {
+        uv.readFile(path, (err: i32, data: string): void => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(data);
+            }
+        });
+    });
+}
+
+export function writeFile(path: string, data: string): Promise<void> {
+    return new Promise<void>((resolve: () => void, reject: (err: i32) => void): void => {
+        let err: i32 = uv.writeFileSync(path, data);
+        if (err) {
+            reject(err);
+        } else {
+            resolve();
+        }
+    });
+}
+
+export function appendFile(path: string, data: string): Promise<void> {
+    return new Promise<void>((resolve: () => void, reject: (err: i32) => void): void => {
+        let err: i32 = uv.appendFileSync(path, data);
+        if (err) {
+            reject(err);
+        } else {
+            resolve();
+        }
+    });
 }
