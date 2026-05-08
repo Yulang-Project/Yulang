@@ -311,6 +311,9 @@ export class DeclarationParser {
                     cloned.name.line,
                     cloned.name.column
                 );
+                cloned.superclass = cloned.superclass
+                    ? new IdentifierExpr(this.rewriteToken(cloned.superclass.name, renamePrefix, renamedNames))
+                    : null;
                 cloned.properties = cloned.properties.map(prop => new PropertyDeclaration(
                     prop.visibility,
                     prop.name,
@@ -327,6 +330,43 @@ export class DeclarationParser {
                     method.capturedVariables,
                     method.isStatic
                 ));
+            }
+            if (renamePrefix && cloned instanceof StructDeclaration) {
+                cloned.name = new Token(
+                    cloned.name.type,
+                    `${renamePrefix}_${cloned.name.lexeme}`,
+                    cloned.name.literal,
+                    cloned.name.line,
+                    cloned.name.column
+                );
+                cloned.properties = cloned.properties.map(prop => new PropertyDeclaration(
+                    prop.visibility,
+                    prop.name,
+                    prop.type ? this.cloneTypeAnnotation(prop.type, renamePrefix, renamedNames) : null,
+                    prop.initializer ? this.rewriteExpr(prop.initializer, renamePrefix, renamedNames) : null
+                ));
+            }
+            if (renamePrefix && cloned instanceof LetStmt) {
+                cloned.name = new Token(
+                    cloned.name.type,
+                    `${renamePrefix}_${cloned.name.lexeme}`,
+                    cloned.name.literal,
+                    cloned.name.line,
+                    cloned.name.column
+                );
+                cloned.type = cloned.type ? this.cloneTypeAnnotation(cloned.type, renamePrefix, renamedNames) : null;
+                cloned.initializer = cloned.initializer ? this.rewriteExpr(cloned.initializer, renamePrefix, renamedNames) : null;
+            }
+            if (renamePrefix && cloned instanceof ConstStmt) {
+                cloned.name = new Token(
+                    cloned.name.type,
+                    `${renamePrefix}_${cloned.name.lexeme}`,
+                    cloned.name.literal,
+                    cloned.name.line,
+                    cloned.name.column
+                );
+                cloned.type = cloned.type ? this.cloneTypeAnnotation(cloned.type, renamePrefix, renamedNames) : null;
+                cloned.initializer = cloned.initializer ? this.rewriteExpr(cloned.initializer, renamePrefix, renamedNames) : null;
             }
             if (cloned instanceof FunctionDeclaration
                 || cloned instanceof LetStmt

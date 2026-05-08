@@ -169,7 +169,7 @@ cli
         if (!fs.existsSync(tempDir)) {
           fs.mkdirSync(tempDir, { recursive: true });
         }
-        const cppPath = path.join(tempDir, `${outputFileName}.c`);
+        const cppPath = path.join(tempDir, `${outputFileName}.cpp`);
         const uvRuntimeSourcePath = path.join(projectRoot, 'runtime', 'yu_uv_runtime.c');
         const runtimeHeaderPath = path.join(projectRoot, 'runtime');
         
@@ -177,14 +177,17 @@ cli
 
         if (options.target === 'exec') {
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
-            const cc = 'gcc';
-            // Compile both generated c and uv runtime c
-            console.log(`  [CMD] ${cc} -O2 -I${runtimeHeaderPath} -o ${outputFilePath} ${cppPath} ${uvRuntimeSourcePath} ${linkerFlags.join(' ')}`);
-            execFileSync(cc, ['-O2', `-I${runtimeHeaderPath}`, '-o', outputFilePath, cppPath, uvRuntimeSourcePath, ...linkerFlags], { stdio: 'inherit' });
+            const runtimeObjPath = path.join(tempDir, `${outputFileName}.runtime.o`);
+            const cxx = fs.existsSync('/usr/bin/g++') ? 'g++' : (fs.existsSync('/usr/bin/c++') ? 'c++' : 'clang++');
+            console.log(`  [CMD] gcc -c -O2 -I${runtimeHeaderPath} ${uvRuntimeSourcePath} -o ${runtimeObjPath}`);
+            execFileSync('gcc', ['-c', '-O2', `-I${runtimeHeaderPath}`, uvRuntimeSourcePath, '-o', runtimeObjPath], { stdio: 'inherit' });
+            console.log(`  [CMD] ${cxx} -std=gnu++17 -O2 -I${runtimeHeaderPath} -o ${outputFilePath} ${cppPath} ${runtimeObjPath} ${linkerFlags.join(' ')}`);
+            execFileSync(cxx, ['-std=gnu++17', '-O2', `-I${runtimeHeaderPath}`, '-o', outputFilePath, cppPath, runtimeObjPath, ...linkerFlags], { stdio: 'inherit' });
         } else if (options.target === 'static-lib') {
             const objPath = path.join(tempDir, `${outputFileName}.o`);
-            console.log(`  [CMD] gcc -c -O2 -I${runtimeHeaderPath} ${cppPath} -o ${objPath}`);
-            execFileSync('gcc', ['-c', '-O2', `-I${runtimeHeaderPath}`, cppPath, '-o', objPath], { stdio: 'inherit' });
+            const cxx = fs.existsSync('/usr/bin/g++') ? 'g++' : (fs.existsSync('/usr/bin/c++') ? 'c++' : 'clang++');
+            console.log(`  [CMD] ${cxx} -std=gnu++17 -c -O2 -I${runtimeHeaderPath} ${cppPath} -o ${objPath}`);
+            execFileSync(cxx, ['-std=gnu++17', '-c', '-O2', `-I${runtimeHeaderPath}`, cppPath, '-o', objPath], { stdio: 'inherit' });
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);
             execFileSync('ar', ['rc', outputFilePath, objPath], { stdio: 'inherit' });
         } else {
