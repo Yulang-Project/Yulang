@@ -20,7 +20,7 @@ export type IRValue = {
     extra?: { isMethod?: boolean; methodName?: string; className?: string; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; promiseValueType?: LLVMTypeRef; }
 };
 
-type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; promiseValueType?: LLVMTypeRef; };
+type SymbolEntry = { llvmType: LLVMTypeRef; ptr: LLVMValueRef; depth: number; pointeeType?: LLVMTypeRef; className?: string; closureFunctionType?: LLVMTypeRef; closureParamTypes?: LLVMTypeRef[]; closureReturnType?: LLVMTypeRef; functionParamTypes?: LLVMTypeRef[]; functionReturnType?: LLVMTypeRef; promiseValueType?: LLVMTypeRef; };
 type CaptureEntry = { name: string; symbol: SymbolEntry; };
 
 class Scope {
@@ -81,7 +81,9 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             type: entry.llvmType,
             address: entry.ptr,
             pointeeType: entry.pointeeType,
-            extra: entry.closureFunctionType ? {
+            extra: entry.className ? {
+                className: entry.className
+            } : entry.closureFunctionType ? {
                 closureFunctionType: entry.closureFunctionType,
                 closureParamTypes: entry.closureParamTypes,
                 closureReturnType: entry.closureReturnType
@@ -232,6 +234,11 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             paramTypes: type.parameters.map(p => this.llvmHelper.getLLVMType(p)),
             returnType: this.llvmHelper.getLLVMType(type.returnType)
         };
+    }
+
+    private getClassNameFromTypeAnnotation(type: TypeAnnotation | null): string | undefined {
+        if (!(type instanceof BasicTypeAnnotation)) return undefined;
+        return this.classes.has(type.name.lexeme) ? type.name.lexeme : undefined;
     }
 
     private collectCaptures(expr: FunctionLiteralExpr): CaptureEntry[] {
@@ -565,6 +572,135 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         };
     }
 
+    private getClosureCodeEnv(callbackArg: IRValue, prefix: string): { codePtr: LLVMValueRef; envPtr: LLVMValueRef } {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const closureType = callbackArg.type;
+        const closurePtr = callbackArg.address ?? LLVM.BuildAlloca(this.builder, closureType, `${prefix}_cb_tmp`);
+        if (!callbackArg.address) LLVM.BuildStore(this.builder, callbackArg.value, closurePtr);
+        const codePtrType = LLVM.StructGetTypeAtIndex(closureType, 0);
+        const codePtr = LLVM.BuildLoad2(this.builder, codePtrType, LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 0, `${prefix}_cb_code_slot`), `${prefix}_cb_code`);
+        const envPtr = LLVM.BuildLoad2(this.builder, i8Ptr, LLVM.BuildStructGEP2(this.builder, closureType, closurePtr, 1, `${prefix}_cb_env_slot`), `${prefix}_cb_env`);
+        return {
+            codePtr: LLVM.BuildPointerCast(this.builder, codePtr, i8Ptr, `${prefix}_cb_code_ptr`),
+            envPtr
+        };
+    }
+
+    private emitUVTcpCreateServer(callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i64, this.toPtrArr([i8Ptr, i8Ptr]), 2, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_tcpCreateServer');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_tcpCreateServer', ft);
+        const cb = this.getClosureCodeEnv(callbackArg, "tcp_create_server");
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([cb.codePtr, cb.envPtr]), 2, "tcp_server_handle"),
+            type: i64
+        };
+    }
+
+    private emitUVTcpListen(serverArg: IRValue, portArg: IRValue, hostArg: IRValue, backlogArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([i64, i32, this.stringStructType, i32, i8Ptr, i8Ptr]), 6, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_tcpListen');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_tcpListen', ft);
+        const cb = this.getClosureCodeEnv(callbackArg, "tcp_listen");
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([
+                this.coerceToType(serverArg, i64, "tcp_server_i64"),
+                this.coerceToType(portArg, i32, "tcp_port_i32"),
+                hostArg.value,
+                this.coerceToType(backlogArg, i32, "tcp_backlog_i32"),
+                cb.codePtr,
+                cb.envPtr
+            ]), 6, "tcp_listen_status"),
+            type: i32
+        };
+    }
+
+    private emitUVTcpConnect(portArg: IRValue, hostArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i64, this.toPtrArr([i32, this.stringStructType, i8Ptr, i8Ptr]), 4, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_tcpConnect');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_tcpConnect', ft);
+        const cb = this.getClosureCodeEnv(callbackArg, "tcp_connect");
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([
+                this.coerceToType(portArg, i32, "tcp_port_i32"),
+                hostArg.value,
+                cb.codePtr,
+                cb.envPtr
+            ]), 4, "tcp_socket_handle"),
+            type: i64
+        };
+    }
+
+    private emitUVTcpReadStart(socketArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([i64, i8Ptr, i8Ptr]), 3, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_tcpReadStart');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_tcpReadStart', ft);
+        const cb = this.getClosureCodeEnv(callbackArg, "tcp_read_start");
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([
+                this.coerceToType(socketArg, i64, "tcp_socket_i64"),
+                cb.codePtr,
+                cb.envPtr
+            ]), 3, "tcp_read_status"),
+            type: i32
+        };
+    }
+
+    private emitUVTcpStatusCallbackCall(name: string, socketArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([i64, i8Ptr, i8Ptr]), 3, 0);
+        let fn = LLVM.GetNamedFunction(this.module, name);
+        if (!fn) fn = LLVM.AddFunction(this.module, name, ft);
+        const cb = this.getClosureCodeEnv(callbackArg, name.replace(/^yu_uv_/, ""));
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([
+                this.coerceToType(socketArg, i64, "tcp_socket_i64"),
+                cb.codePtr,
+                cb.envPtr
+            ]), 3, name.replace(/^yu_uv_/, "")),
+            type: i32
+        };
+    }
+
+    private emitUVTcpWrite(socketArg: IRValue, dataArg: IRValue, callbackArg: IRValue): IRValue {
+        const ctx = this.llvmHelper.getContext();
+        const i8Ptr = LLVM.PointerType(LLVM.Int8TypeInContext(ctx), 0);
+        const i32 = LLVM.Int32TypeInContext(ctx);
+        const i64 = LLVM.Int64TypeInContext(ctx);
+        const ft = LLVM.FunctionType(i32, this.toPtrArr([i64, this.stringStructType, i8Ptr, i8Ptr]), 4, 0);
+        let fn = LLVM.GetNamedFunction(this.module, 'yu_uv_tcpWrite');
+        if (!fn) fn = LLVM.AddFunction(this.module, 'yu_uv_tcpWrite', ft);
+        const cb = this.getClosureCodeEnv(callbackArg, "tcp_write");
+        return {
+            value: LLVM.BuildCall2(this.builder, ft, fn, this.toPtrArr([
+                this.coerceToType(socketArg, i64, "tcp_socket_i64"),
+                dataArg.value,
+                cb.codePtr,
+                cb.envPtr
+            ]), 4, "tcp_write_status"),
+            type: i32
+        };
+    }
+
     private getClibFunctionType(name: string): LLVMTypeRef {
         const ctx = this.llvmHelper.getContext();
         const i8 = LLVM.Int8TypeInContext(ctx);
@@ -748,11 +884,15 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
         }
         const actualType = (LLVM.GetTypeKind(obj.type) === 12) ? obj.pointeeType : obj.type;
         if (actualType && LLVM.GetTypeKind(actualType) === 10) {
+            const knownClassName = obj.extra?.className;
+            const classEntries = knownClassName && this.classes.has(knownClassName)
+                ? [[knownClassName, this.classes.get(knownClassName)!] as [string, ClassDeclaration]]
+                : Array.from(this.classes.entries());
             // Manual lookup based on current class being visited or stored info
             // For now, let's use a simpler way to identify the class
-            for (const [className, classDecl] of this.classes) {
+            for (const [className, classDecl] of classEntries) {
                 const structType = this.llvmHelper.getLLVMTypeByName(`struct.${className}`);
-                if (structType === actualType) {
+                if (knownClassName || structType === actualType) {
                     // Check properties
                     const propIndex = classDecl.properties.findIndex(p => p.name.lexeme === expr.name.lexeme);
                     if (propIndex !== -1) {
@@ -781,7 +921,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             if (expr.name.lexeme === 'length') return { value: LLVM.BuildLoad2(this.builder, LLVM.Int64TypeInContext(ctx), LLVM.BuildStructGEP2(this.builder, actualType, ptr, 1, ""), "l"), type: LLVM.Int64TypeInContext(ctx) };
             if (expr.name.lexeme === 'push') return { value: obj.value, type: obj.type, address: obj.address, pointeeType: actualType, extra: { isMethod: true, methodName: 'push' } };
         }
-        throw new Error(`Property ${expr.name.lexeme} not found`);
+        throw new Error(`Property ${expr.name.lexeme} not found on class ${obj.extra?.className ?? 'unknown'}`);
     }
 
     visitCallExpr(expr: CallExpr): IRValue {
@@ -853,6 +993,44 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             if (uvName === 'rmdirSync') {
                 const pathArg = expr.args[0]!.accept(this) as IRValue;
                 return this.emitUVStatusPathCall('yu_uv_rmdirSync', [pathArg]);
+            }
+            if (uvName === 'tcpCreateServer') {
+                const callbackArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitUVTcpCreateServer(callbackArg);
+            }
+            if (uvName === 'tcpListen') {
+                const serverArg = expr.args[0]!.accept(this) as IRValue;
+                const portArg = expr.args[1]!.accept(this) as IRValue;
+                const hostArg = expr.args[2]!.accept(this) as IRValue;
+                const backlogArg = expr.args[3]!.accept(this) as IRValue;
+                const callbackArg = expr.args[4]!.accept(this) as IRValue;
+                return this.emitUVTcpListen(serverArg, portArg, hostArg, backlogArg, callbackArg);
+            }
+            if (uvName === 'tcpConnect') {
+                const portArg = expr.args[0]!.accept(this) as IRValue;
+                const hostArg = expr.args[1]!.accept(this) as IRValue;
+                const callbackArg = expr.args[2]!.accept(this) as IRValue;
+                return this.emitUVTcpConnect(portArg, hostArg, callbackArg);
+            }
+            if (uvName === 'tcpReadStart') {
+                const socketArg = expr.args[0]!.accept(this) as IRValue;
+                const callbackArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVTcpReadStart(socketArg, callbackArg);
+            }
+            if (uvName === 'tcpWrite') {
+                const socketArg = expr.args[0]!.accept(this) as IRValue;
+                const dataArg = expr.args[1]!.accept(this) as IRValue;
+                const callbackArg = expr.args[2]!.accept(this) as IRValue;
+                return this.emitUVTcpWrite(socketArg, dataArg, callbackArg);
+            }
+            if (uvName === 'tcpShutdown') {
+                const socketArg = expr.args[0]!.accept(this) as IRValue;
+                const callbackArg = expr.args[1]!.accept(this) as IRValue;
+                return this.emitUVTcpStatusCallbackCall('yu_uv_tcpShutdown', socketArg, callbackArg);
+            }
+            if (uvName === 'tcpClose') {
+                const socketArg = expr.args[0]!.accept(this) as IRValue;
+                return this.emitUVStatusPathCall('yu_uv_tcpClose', [socketArg]);
             }
         }
 
@@ -1003,7 +1181,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             }
             d.parameters.forEach((p, i) => {
                 const pt = this.llvmHelper.getLLVMType(p.type), a = this.allocateCell(pt, p.name.lexeme);
-                LLVM.BuildStore(this.builder, LLVM.GetParam(f, i), a); this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1 });
+                LLVM.BuildStore(this.builder, LLVM.GetParam(f, i), a); this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1, className: this.getClassNameFromTypeAnnotation(p.type) });
             });
             d.body.statements.forEach(s => s.accept(this));
             if (LLVM.GetTypeKind(rt) === 0) LLVM.BuildRetVoid(this.builder);
@@ -1024,6 +1202,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             ptr: p,
             depth: this.currentScope.depth,
             pointeeType: initializer?.pointeeType,
+            className: initializer?.extra?.className,
             closureFunctionType: initializer?.extra?.closureFunctionType ?? closureMetadata.functionType,
             closureParamTypes: initializer?.extra?.closureParamTypes ?? closureMetadata.paramTypes,
             closureReturnType: initializer?.extra?.closureReturnType ?? closureMetadata.returnType
@@ -1187,7 +1366,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             LLVM.BuildCall2(this.builder, ft, f, this.toPtrArr(args), args.length, "");
         }
 
-        return { value: objPtr, type: LLVM.PointerType(structType, 0), pointeeType: structType };
+        return { value: objPtr, type: LLVM.PointerType(structType, 0), pointeeType: structType, extra: { className } };
     }
 
     private emitNewPromise(e: NewExpr): IRValue {
@@ -1328,7 +1507,7 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
             const pt = this.llvmHelper.getLLVMType(p.type);
             const cell = this.allocateCell(pt, p.name.lexeme);
             LLVM.BuildStore(this.builder, LLVM.GetParam(closureFn, i + 1), cell);
-            this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: cell, depth: 1 });
+            this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: cell, depth: 1, className: this.getClassNameFromTypeAnnotation(p.type) });
         });
 
         e.body.statements.forEach(s => s.accept(this));
@@ -1443,12 +1622,12 @@ export class IRGenerator implements ExprVisitor<IRValue>, StmtVisitor<void> {
                 
                 const thisPtr = LLVM.BuildAlloca(this.builder, LLVM.PointerType(structType, 0), "this");
                 LLVM.BuildStore(this.builder, LLVM.GetParam(f, 0), thisPtr);
-                this.currentScope.define("this", { llvmType: LLVM.PointerType(structType, 0), ptr: thisPtr, depth: 1, pointeeType: structType });
+                this.currentScope.define("this", { llvmType: LLVM.PointerType(structType, 0), ptr: thisPtr, depth: 1, pointeeType: structType, className: n });
 
                 m.parameters.forEach((p, i) => {
                     const pt = this.llvmHelper.getLLVMType(p.type), a = LLVM.BuildAlloca(this.builder, pt, p.name.lexeme);
                     LLVM.BuildStore(this.builder, LLVM.GetParam(f, i + 1), a);
-                    this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1 });
+                    this.currentScope.define(p.name.lexeme, { llvmType: pt, ptr: a, depth: 1, className: this.getClassNameFromTypeAnnotation(p.type) });
                 });
 
                 m.body.statements.forEach(s => s.accept(this));

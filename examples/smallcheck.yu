@@ -1,0 +1,8 @@
+import * as time from "std:time";
+import * as io from "std:io";
+
+
+export function main(): i32 {
+    io.println(time.time());
+    return 0;
+}

@@ -1,7 +1,10 @@
 import { Token, TokenType } from '../token.js';
 import {
     Stmt, LetStmt, FunctionDeclaration, ClassDeclaration, StructDeclaration, PropertyDeclaration, DeclareFunction, ImportStmt, ConstStmt,
-    Parameter, TypeAnnotation, Expr, ExpressionStmt, LiteralExpr, AsExpr, ObjectLiteralExpr, AddressOfExpr
+    Parameter, TypeAnnotation, Expr, ExpressionStmt, LiteralExpr, AsExpr, ObjectLiteralExpr, AddressOfExpr,
+    BinaryExpr, UnaryExpr, IdentifierExpr, GroupingExpr, CallExpr, GetExpr, IndexExpr, AssignExpr, ThisExpr, AwaitExpr,
+    NewExpr, DeleteExpr, DereferenceExpr, FunctionLiteralExpr, ArrayLiteralExpr, BlockStmt, IfStmt, WhileStmt, ReturnStmt,
+    BasicTypeAnnotation, ArrayTypeAnnotation, PointerTypeAnnotation, FunctionTypeAnnotation, PromiseTypeAnnotation
 } from '../ast.js';
 import { Parser } from './index.js';
 import { TypeParser } from './type_parser.js';
@@ -160,10 +163,14 @@ export class DeclarationParser {
 
         if (importStmt.namespaceAlias) {
             const prefix = this.getModuleSymbolPrefix(modulePath);
+            const exportedNames = new Set(exportedMap.keys());
             this.parser.namespaceImports.set(importStmt.namespaceAlias.lexeme, new Map(
                 Array.from(exportedMap.keys()).map((name) => [name, `${prefix}_${name}`])
             ));
-            return this.cloneImportedDeclarations(Array.from(exportedMap.values()), prefix);
+            return [
+                ...this.cloneImportedDeclarations(this.collectDependencyDeclarations(moduleDeclarations)),
+                ...this.cloneImportedDeclarations(Array.from(exportedMap.values()), prefix, exportedNames)
+            ];
         }
 
         if (importStmt.namedImports && importStmt.namedImports.length > 0) {
@@ -281,7 +288,7 @@ export class DeclarationParser {
         return modulePath.replace(/[^A-Za-z0-9_]/g, '_');
     }
 
-    private cloneImportedDeclarations(statements: Stmt[], renamePrefix: string | null = null): Stmt[] {
+    private cloneImportedDeclarations(statements: Stmt[], renamePrefix: string | null = null, renamedNames: Set<string> = new Set()): Stmt[] {
         return statements.map((statement) => {
             const cloned = Object.assign(Object.create(Object.getPrototypeOf(statement)), statement) as Stmt;
             if (renamePrefix && cloned instanceof FunctionDeclaration) {
@@ -292,6 +299,35 @@ export class DeclarationParser {
                     cloned.name.line,
                     cloned.name.column
                 );
+                cloned.parameters = cloned.parameters.map(param => this.cloneParameter(param, renamePrefix, renamedNames));
+                cloned.returnType = cloned.returnType ? this.cloneTypeAnnotation(cloned.returnType, renamePrefix, renamedNames) : null;
+                cloned.body = this.cloneBlockStmt(cloned.body, renamePrefix, renamedNames);
+            }
+            if (renamePrefix && cloned instanceof ClassDeclaration) {
+                cloned.name = new Token(
+                    cloned.name.type,
+                    `${renamePrefix}_${cloned.name.lexeme}`,
+                    cloned.name.literal,
+                    cloned.name.line,
+                    cloned.name.column
+                );
+                cloned.properties = cloned.properties.map(prop => new PropertyDeclaration(
+                    prop.name,
+                    prop.type ? this.cloneTypeAnnotation(prop.type, renamePrefix, renamedNames) : null,
+                    prop.initializer ? this.rewriteExpr(prop.initializer, renamePrefix, renamedNames) : null,
+                    prop.visibility,
+                    prop.isStatic
+                ));
+                cloned.methods = cloned.methods.map(method => new FunctionDeclaration(
+                    method.name,
+                    method.parameters.map(param => this.cloneParameter(param, renamePrefix, renamedNames)),
+                    method.returnType ? this.cloneTypeAnnotation(method.returnType, renamePrefix, renamedNames) : null,
+                    this.cloneBlockStmt(method.body, renamePrefix, renamedNames),
+                    method.isExported,
+                    method.visibility,
+                    method.capturedVariables,
+                    method.isStatic
+                ));
             }
             if (cloned instanceof FunctionDeclaration
                 || cloned instanceof LetStmt
@@ -302,6 +338,145 @@ export class DeclarationParser {
             }
             return cloned;
         });
+    }
+
+    private cloneParameter(parameter: Parameter, renamePrefix: string, renamedNames: Set<string>): Parameter {
+        return new Parameter(
+            parameter.name,
+            parameter.type ? this.cloneTypeAnnotation(parameter.type, renamePrefix, renamedNames) : null
+        );
+    }
+
+    private rewriteToken(token: Token, renamePrefix: string, renamedNames: Set<string>): Token {
+        if (!renamedNames.has(token.lexeme)) return token;
+        return new Token(token.type, `${renamePrefix}_${token.lexeme}`, token.literal, token.line, token.column);
+    }
+
+    private cloneTypeAnnotation(type: TypeAnnotation, renamePrefix: string, renamedNames: Set<string>): TypeAnnotation {
+        if (type instanceof BasicTypeAnnotation) {
+            return new BasicTypeAnnotation(this.rewriteToken(type.name, renamePrefix, renamedNames));
+        }
+        if (type instanceof ArrayTypeAnnotation) {
+            return new ArrayTypeAnnotation(this.cloneTypeAnnotation(type.elementType, renamePrefix, renamedNames));
+        }
+        if (type instanceof PointerTypeAnnotation) {
+            return new PointerTypeAnnotation(this.cloneTypeAnnotation(type.baseType, renamePrefix, renamedNames));
+        }
+        if (type instanceof FunctionTypeAnnotation) {
+            return new FunctionTypeAnnotation(
+                type.parameters.map(param => this.cloneTypeAnnotation(param, renamePrefix, renamedNames)),
+                this.cloneTypeAnnotation(type.returnType, renamePrefix, renamedNames)
+            );
+        }
+        if (type instanceof PromiseTypeAnnotation) {
+            return new PromiseTypeAnnotation(this.cloneTypeAnnotation(type.valueType, renamePrefix, renamedNames));
+        }
+        return type;
+    }
+
+    private cloneBlockStmt(block: BlockStmt, renamePrefix: string, renamedNames: Set<string>): BlockStmt {
+        return new BlockStmt(block.statements.map(statement => this.rewriteStmt(statement, renamePrefix, renamedNames)));
+    }
+
+    private rewriteStmt(statement: Stmt, renamePrefix: string, renamedNames: Set<string>): Stmt {
+        if (statement instanceof ExpressionStmt) {
+            return new ExpressionStmt(this.rewriteExpr(statement.expression, renamePrefix, renamedNames));
+        }
+        if (statement instanceof LetStmt) {
+            return new LetStmt(
+                statement.name,
+                statement.type ? this.cloneTypeAnnotation(statement.type, renamePrefix, renamedNames) : null,
+                statement.initializer ? this.rewriteExpr(statement.initializer, renamePrefix, renamedNames) : null,
+                statement.isExported
+            );
+        }
+        if (statement instanceof ConstStmt) {
+            return new ConstStmt(
+                statement.name,
+                statement.type ? this.cloneTypeAnnotation(statement.type, renamePrefix, renamedNames) : null,
+                statement.initializer ? this.rewriteExpr(statement.initializer, renamePrefix, renamedNames) : null,
+                statement.isExported
+            );
+        }
+        if (statement instanceof ReturnStmt) {
+            return new ReturnStmt(statement.keyword, statement.value ? this.rewriteExpr(statement.value, renamePrefix, renamedNames) : null);
+        }
+        if (statement instanceof BlockStmt) {
+            return this.cloneBlockStmt(statement, renamePrefix, renamedNames);
+        }
+        if (statement instanceof IfStmt) {
+            return new IfStmt(
+                this.rewriteExpr(statement.condition, renamePrefix, renamedNames),
+                this.rewriteStmt(statement.thenBranch, renamePrefix, renamedNames),
+                statement.elseBranch ? this.rewriteStmt(statement.elseBranch, renamePrefix, renamedNames) : null
+            );
+        }
+        if (statement instanceof WhileStmt) {
+            return new WhileStmt(
+                this.rewriteExpr(statement.condition, renamePrefix, renamedNames),
+                this.rewriteStmt(statement.body, renamePrefix, renamedNames)
+            );
+        }
+        return statement;
+    }
+
+    private rewriteExpr(expr: Expr, renamePrefix: string, renamedNames: Set<string>): Expr {
+        if (expr instanceof IdentifierExpr) {
+            return new IdentifierExpr(this.rewriteToken(expr.name, renamePrefix, renamedNames));
+        }
+        if (expr instanceof BinaryExpr) {
+            return new BinaryExpr(this.rewriteExpr(expr.left, renamePrefix, renamedNames), expr.operator, this.rewriteExpr(expr.right, renamePrefix, renamedNames));
+        }
+        if (expr instanceof UnaryExpr) {
+            return new UnaryExpr(expr.operator, this.rewriteExpr(expr.right, renamePrefix, renamedNames));
+        }
+        if (expr instanceof GroupingExpr) {
+            return new GroupingExpr(this.rewriteExpr(expr.expression, renamePrefix, renamedNames));
+        }
+        if (expr instanceof CallExpr) {
+            return new CallExpr(this.rewriteExpr(expr.callee, renamePrefix, renamedNames), expr.paren, expr.args.map(arg => this.rewriteExpr(arg, renamePrefix, renamedNames)));
+        }
+        if (expr instanceof GetExpr) {
+            return new GetExpr(this.rewriteExpr(expr.object, renamePrefix, renamedNames), expr.name);
+        }
+        if (expr instanceof IndexExpr) {
+            return new IndexExpr(this.rewriteExpr(expr.array, renamePrefix, renamedNames), this.rewriteExpr(expr.index, renamePrefix, renamedNames));
+        }
+        if (expr instanceof AssignExpr) {
+            return new AssignExpr(this.rewriteExpr(expr.target, renamePrefix, renamedNames), this.rewriteExpr(expr.value, renamePrefix, renamedNames));
+        }
+        if (expr instanceof AsExpr) {
+            return new AsExpr(this.rewriteExpr(expr.expression, renamePrefix, renamedNames), this.cloneTypeAnnotation(expr.type, renamePrefix, renamedNames));
+        }
+        if (expr instanceof AwaitExpr) {
+            return new AwaitExpr(this.rewriteExpr(expr.expression, renamePrefix, renamedNames));
+        }
+        if (expr instanceof ObjectLiteralExpr) {
+            return new ObjectLiteralExpr(new Map(Array.from(expr.properties.entries()).map(([key, value]) => [key, this.rewriteExpr(value, renamePrefix, renamedNames)])));
+        }
+        if (expr instanceof NewExpr) {
+            return new NewExpr(this.rewriteExpr(expr.callee, renamePrefix, renamedNames), expr.args.map(arg => this.rewriteExpr(arg, renamePrefix, renamedNames)));
+        }
+        if (expr instanceof DeleteExpr) {
+            return new DeleteExpr(this.rewriteExpr(expr.target, renamePrefix, renamedNames));
+        }
+        if (expr instanceof AddressOfExpr) {
+            return new AddressOfExpr(this.rewriteExpr(expr.expression, renamePrefix, renamedNames));
+        }
+        if (expr instanceof DereferenceExpr) {
+            return new DereferenceExpr(this.rewriteExpr(expr.expression, renamePrefix, renamedNames));
+        }
+        if (expr instanceof FunctionLiteralExpr) {
+            return new FunctionLiteralExpr(
+                expr.parameters.map(param => this.cloneParameter(param, renamePrefix, renamedNames)),
+                expr.returnType ? this.cloneTypeAnnotation(expr.returnType, renamePrefix, renamedNames) : null,
+                this.cloneBlockStmt(expr.body, renamePrefix, renamedNames)
+            );
+        }
+        if (expr instanceof ArrayLiteralExpr) {
+            return new ArrayLiteralExpr(expr.elements.map(element => this.rewriteExpr(element, renamePrefix, renamedNames)));
+        }
+        return expr;
     }
 
     public classDeclaration(): ClassDeclaration {

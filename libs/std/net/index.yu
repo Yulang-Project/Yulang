@@ -1,0 +1,86 @@
+import * as uv from "std:uv";
+
+export class Socket {
+    public handle: i64;
+
+    function init(handle: i64): void {
+        this.handle = handle;
+    }
+
+    function write(data: string, callback: (err: i32) => void): bool {
+        let status: i32 = uv.tcpWrite(this.handle, data, callback);
+        return status == 0;
+    }
+
+    function end(callback: (err: i32) => void): void {
+        uv.tcpShutdown(this.handle, callback);
+    }
+
+    function destroy(): void {
+        uv.tcpClose(this.handle);
+    }
+
+    function on(event: string, listener: (data: string) => void): Socket {
+        uv.tcpReadStart(this.handle, (err: i32, data: string): void => {
+            if (err == 0) {
+                listener(data);
+            }
+        });
+        return this;
+    }
+
+    function onData(listener: (data: string) => void): Socket {
+        return this.on("data", listener);
+    }
+
+    function onEnd(listener: () => void): Socket {
+        uv.tcpReadStart(this.handle, (err: i32, data: string): void => {
+            if (err != 0) {
+                listener();
+            }
+        });
+        return this;
+    }
+}
+
+export class Server {
+    public handle: i64;
+
+    function init(connectionListener: (socket: Socket) => void): void {
+        this.handle = uv.tcpCreateServer((socketHandle: i64): void => {
+            let socket = new Socket(socketHandle);
+            connectionListener(socket);
+        });
+    }
+
+    function listen(port: i32, host: string, callback: () => void): Server {
+        uv.tcpListen(this.handle, port, host, 511, (status: i32): void => {
+            if (status == 0) {
+                callback();
+            }
+        });
+        return this;
+    }
+
+    function close(): void {
+        uv.tcpClose(this.handle);
+    }
+}
+
+export function createServer(connectionListener: (socket: Socket) => void): Server {
+    return new Server(connectionListener);
+}
+
+export function connect(port: i32, host: string, connectListener: (socket: Socket) => void): Socket {
+    let socket = new Socket(0);
+    socket.handle = uv.tcpConnect(port, host, (status: i32): void => {
+        if (status == 0) {
+            connectListener(socket);
+        }
+    });
+    return socket;
+}
+
+export function createConnection(port: i32, host: string, connectListener: (socket: Socket) => void): Socket {
+    return connect(port, host, connectListener);
+}

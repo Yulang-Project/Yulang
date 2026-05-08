@@ -16,6 +16,9 @@ typedef struct {
 } yu_string_promise;
 
 typedef void (*yu_read_file_cb)(void *env, int32_t err, yu_string data);
+typedef void (*yu_net_connection_cb)(void *env, int64_t socket_handle);
+typedef void (*yu_net_data_cb)(void *env, int32_t err, yu_string data);
+typedef void (*yu_net_status_cb)(void *env, int32_t status);
 
 typedef struct {
     yu_string_promise *promise;
@@ -35,6 +38,43 @@ typedef struct yu_read_file_req {
     int64_t length;
     int32_t err;
 } yu_read_file_req;
+
+typedef struct yu_tcp_socket {
+    uv_tcp_t handle;
+    yu_net_data_cb data_cb;
+    void *data_env;
+    yu_net_status_cb end_cb;
+    void *end_env;
+} yu_tcp_socket;
+
+typedef struct yu_tcp_server {
+    uv_tcp_t handle;
+    yu_net_connection_cb connection_cb;
+    void *connection_env;
+    yu_net_status_cb listen_cb;
+    void *listen_env;
+} yu_tcp_server;
+
+typedef struct {
+    uv_connect_t req;
+    yu_tcp_socket *socket;
+    yu_net_status_cb cb;
+    void *env;
+} yu_tcp_connect_req;
+
+typedef struct {
+    uv_write_t req;
+    uv_buf_t buf;
+    char *data;
+    yu_net_status_cb cb;
+    void *env;
+} yu_tcp_write_req;
+
+typedef struct {
+    uv_shutdown_t req;
+    yu_net_status_cb cb;
+    void *env;
+} yu_tcp_shutdown_req;
 
 extern void *GC_malloc(size_t size);
 
@@ -299,4 +339,199 @@ int32_t yu_uv_rmdirSync(yu_string path) {
     uv_fs_req_cleanup(&req);
     free(path_buf);
     return rc;
+}
+
+static yu_string yu_gc_string_from_buf(const char *data, int64_t length) {
+    yu_string result;
+    if (data && length > 0) {
+        char *gc_data = (char *)GC_malloc((size_t)length + 1);
+        memcpy(gc_data, data, (size_t)length);
+        gc_data[length] = '\0';
+        result.ptr = gc_data;
+        result.length = length;
+    } else {
+        result.ptr = yu_empty_string;
+        result.length = 0;
+    }
+    return result;
+}
+
+static void yu_net_alloc_cb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+    (void)handle;
+    buf->base = (char *)malloc(suggested_size);
+    buf->len = suggested_size;
+}
+
+static void yu_net_read_cb(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
+    yu_tcp_socket *socket = (yu_tcp_socket *)stream->data;
+    if (nread > 0) {
+        if (socket && socket->data_cb) {
+            yu_string data = yu_gc_string_from_buf(buf->base, (int64_t)nread);
+            socket->data_cb(socket->data_env, 0, data);
+        }
+    } else if (nread < 0) {
+        uv_read_stop(stream);
+        if (socket && socket->data_cb && nread != UV_EOF) {
+            socket->data_cb(socket->data_env, (int32_t)nread, (yu_string){ yu_empty_string, 0 });
+        }
+        if (socket && socket->end_cb) {
+            socket->end_cb(socket->end_env, (int32_t)nread);
+        }
+    }
+    if (buf->base) free(buf->base);
+}
+
+static void yu_net_on_connection(uv_stream_t *server_stream, int status) {
+    yu_tcp_server *server = (yu_tcp_server *)server_stream->data;
+    if (!server || status < 0) {
+        if (server && server->listen_cb) server->listen_cb(server->listen_env, status);
+        return;
+    }
+
+    yu_tcp_socket *client = (yu_tcp_socket *)GC_malloc(sizeof(yu_tcp_socket));
+    memset(client, 0, sizeof(yu_tcp_socket));
+    int rc = uv_tcp_init(uv_default_loop(), &client->handle);
+    if (rc < 0) {
+        if (server->listen_cb) server->listen_cb(server->listen_env, rc);
+        return;
+    }
+    client->handle.data = client;
+
+    rc = uv_accept(server_stream, (uv_stream_t *)&client->handle);
+    if (rc < 0) {
+        uv_close((uv_handle_t *)&client->handle, NULL);
+        if (server->listen_cb) server->listen_cb(server->listen_env, rc);
+        return;
+    }
+
+    if (server->connection_cb) {
+        server->connection_cb(server->connection_env, (int64_t)(intptr_t)client);
+    }
+}
+
+static void yu_net_on_connect(uv_connect_t *connect_req, int status) {
+    yu_tcp_connect_req *ctx = (yu_tcp_connect_req *)connect_req->data;
+    if (ctx && ctx->cb) ctx->cb(ctx->env, status);
+}
+
+static char *yu_owned_c_path(yu_string value) {
+    char *buffer = (char *)malloc((size_t)value.length + 1);
+    if (!buffer) return NULL;
+    memcpy(buffer, value.ptr, (size_t)value.length);
+    buffer[value.length] = '\0';
+    return buffer;
+}
+
+int64_t yu_uv_tcpCreateServer(void *code, void *env) {
+    yu_tcp_server *server = (yu_tcp_server *)GC_malloc(sizeof(yu_tcp_server));
+    memset(server, 0, sizeof(yu_tcp_server));
+    int rc = uv_tcp_init(uv_default_loop(), &server->handle);
+    if (rc < 0) return rc;
+    server->connection_cb = (yu_net_connection_cb)code;
+    server->connection_env = env;
+    server->handle.data = server;
+    return (int64_t)(intptr_t)server;
+}
+
+int32_t yu_uv_tcpListen(int64_t server_handle, int32_t port, yu_string host, int32_t backlog, void *code, void *env) {
+    yu_tcp_server *server = (yu_tcp_server *)(intptr_t)server_handle;
+    if (!server) return -EINVAL;
+
+    char *host_buf = yu_owned_c_path(host);
+    if (!host_buf) return -ENOMEM;
+
+    struct sockaddr_in addr;
+    int rc = uv_ip4_addr(host_buf, port, &addr);
+    free(host_buf);
+    if (rc < 0) return rc;
+
+    rc = uv_tcp_bind(&server->handle, (const struct sockaddr *)&addr, 0);
+    if (rc < 0) return rc;
+
+    server->listen_cb = (yu_net_status_cb)code;
+    server->listen_env = env;
+    rc = uv_listen((uv_stream_t *)&server->handle, backlog, yu_net_on_connection);
+    if (rc == 0 && server->listen_cb) {
+        server->listen_cb(server->listen_env, 0);
+    }
+    return rc;
+}
+
+int64_t yu_uv_tcpConnect(int32_t port, yu_string host, void *code, void *env) {
+    yu_tcp_socket *socket = (yu_tcp_socket *)GC_malloc(sizeof(yu_tcp_socket));
+    memset(socket, 0, sizeof(yu_tcp_socket));
+    int rc = uv_tcp_init(uv_default_loop(), &socket->handle);
+    if (rc < 0) return rc;
+    socket->handle.data = socket;
+
+    char *host_buf = yu_owned_c_path(host);
+    if (!host_buf) return -ENOMEM;
+
+    struct sockaddr_in addr;
+    rc = uv_ip4_addr(host_buf, port, &addr);
+    free(host_buf);
+    if (rc < 0) return rc;
+
+    yu_tcp_connect_req *req = (yu_tcp_connect_req *)GC_malloc(sizeof(yu_tcp_connect_req));
+    memset(req, 0, sizeof(yu_tcp_connect_req));
+    req->socket = socket;
+    req->cb = (yu_net_status_cb)code;
+    req->env = env;
+    req->req.data = req;
+    rc = uv_tcp_connect(&req->req, &socket->handle, (const struct sockaddr *)&addr, yu_net_on_connect);
+    if (rc < 0) return rc;
+    return (int64_t)(intptr_t)socket;
+}
+
+int32_t yu_uv_tcpReadStart(int64_t socket_handle, void *code, void *env) {
+    yu_tcp_socket *socket = (yu_tcp_socket *)(intptr_t)socket_handle;
+    if (!socket) return -EINVAL;
+    socket->data_cb = (yu_net_data_cb)code;
+    socket->data_env = env;
+    return uv_read_start((uv_stream_t *)&socket->handle, yu_net_alloc_cb, yu_net_read_cb);
+}
+
+static void yu_net_write_done(uv_write_t *write_req, int status) {
+    yu_tcp_write_req *req = (yu_tcp_write_req *)write_req->data;
+    if (req && req->cb) req->cb(req->env, status);
+    if (req) free(req->data);
+}
+
+int32_t yu_uv_tcpWrite(int64_t socket_handle, yu_string data, void *code, void *env) {
+    yu_tcp_socket *socket = (yu_tcp_socket *)(intptr_t)socket_handle;
+    if (!socket) return -EINVAL;
+
+    yu_tcp_write_req *req = (yu_tcp_write_req *)GC_malloc(sizeof(yu_tcp_write_req));
+    memset(req, 0, sizeof(yu_tcp_write_req));
+    req->data = (char *)malloc((size_t)data.length);
+    if (!req->data && data.length > 0) return -ENOMEM;
+    memcpy(req->data, data.ptr, (size_t)data.length);
+    req->buf = uv_buf_init(req->data, (unsigned int)data.length);
+    req->cb = (yu_net_status_cb)code;
+    req->env = env;
+    req->req.data = req;
+    return uv_write(&req->req, (uv_stream_t *)&socket->handle, &req->buf, 1, yu_net_write_done);
+}
+
+static void yu_net_shutdown_done(uv_shutdown_t *shutdown_req, int status) {
+    yu_tcp_shutdown_req *req = (yu_tcp_shutdown_req *)shutdown_req->data;
+    if (req && req->cb) req->cb(req->env, status);
+}
+
+int32_t yu_uv_tcpShutdown(int64_t socket_handle, void *code, void *env) {
+    yu_tcp_socket *socket = (yu_tcp_socket *)(intptr_t)socket_handle;
+    if (!socket) return -EINVAL;
+    yu_tcp_shutdown_req *req = (yu_tcp_shutdown_req *)GC_malloc(sizeof(yu_tcp_shutdown_req));
+    memset(req, 0, sizeof(yu_tcp_shutdown_req));
+    req->cb = (yu_net_status_cb)code;
+    req->env = env;
+    req->req.data = req;
+    return uv_shutdown(&req->req, (uv_stream_t *)&socket->handle, yu_net_shutdown_done);
+}
+
+int32_t yu_uv_tcpClose(int64_t handle) {
+    uv_handle_t *uv_handle = (uv_handle_t *)(intptr_t)handle;
+    if (!uv_handle) return -EINVAL;
+    if (!uv_is_closing(uv_handle)) uv_close(uv_handle, NULL);
+    return 0;
 }

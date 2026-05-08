@@ -65,6 +65,18 @@ export class TypeParser {
             let nameToken = this.parser.previous();
             if (this.parser.match(TokenType.DOT)) {
                 const property = this.parser.consume(TokenType.IDENTIFIER, "Expect property name after '.'.");
+                const namespaceMap = this.parser.namespaceImports.get(nameToken.lexeme);
+                const importedName = namespaceMap?.get(property.lexeme);
+                if (importedName) {
+                    nameToken = new Token(
+                        TokenType.IDENTIFIER,
+                        importedName,
+                        null,
+                        nameToken.line,
+                        nameToken.column
+                    );
+                    return new BasicTypeAnnotation(nameToken);
+                }
                 nameToken = new Token(
                     TokenType.IDENTIFIER,
                     `${nameToken.lexeme}.${property.lexeme}`,

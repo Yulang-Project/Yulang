@@ -33,3 +33,31 @@ export function rmdirSync(path: string): i32 {
 export function accessSync(path: string, mode: i32): i32 {
     return uv.accessSync(path, mode);
 }
+
+export function tcpCreateServer(callback: (socket: i64) => void): i64 {
+    return uv.tcpCreateServer(callback);
+}
+
+export function tcpListen(server: i64, port: i32, host: string, backlog: i32, callback: (status: i32) => void): i32 {
+    return uv.tcpListen(server, port, host, backlog, callback);
+}
+
+export function tcpConnect(port: i32, host: string, callback: (status: i32) => void): i64 {
+    return uv.tcpConnect(port, host, callback);
+}
+
+export function tcpReadStart(socket: i64, callback: (err: i32, data: string) => void): i32 {
+    return uv.tcpReadStart(socket, callback);
+}
+
+export function tcpWrite(socket: i64, data: string, callback: (status: i32) => void): i32 {
+    return uv.tcpWrite(socket, data, callback);
+}
+
+export function tcpShutdown(socket: i64, callback: (status: i32) => void): i32 {
+    return uv.tcpShutdown(socket, callback);
+}
+
+export function tcpClose(handle: i64): i32 {
+    return uv.tcpClose(handle);
+}

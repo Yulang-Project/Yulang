@@ -187,8 +187,13 @@ export class LLVMIRHelper {
                 case 'void':
                     return LLVM.VoidTypeInContext(this.context);
             }
+
+            const structType = this.getLLVMTypeByName(`struct.${typeName}`);
+            if (LLVM.CountStructElementTypes(structType) > 0) {
+                return LLVM.PointerType(structType, 0);
+            }
             
-            return this.getLLVMTypeByName(`struct.${typeName}`);
+            return structType;
         }
         
         return LLVM.VoidTypeInContext(this.context);
