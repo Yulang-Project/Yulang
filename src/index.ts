@@ -7,7 +7,7 @@ import { execFileSync } from 'child_process';
 
 import { Lexer } from './lexer.js';
 import { Parser } from './parser/index.js';
-import { IRGenerator } from './generator/ir_generator.js';
+import { CppGenerator } from './generator/cpp_generator.js';
 import { Stmt, AstPrinter, FunctionDeclaration, Parameter, TypeAnnotation, DeclareFunction, ClassDeclaration, StructDeclaration, PropertyDeclaration } from './ast.js';
 import { ProjectFinder } from './Finder.js';
 import { X86_64LinuxPlatform } from './platform/os/linux/x86_64/index.js';
@@ -27,8 +27,8 @@ const cli = cac('tsyuc');
 cli
   .command('<file>', 'Compile a Yulang source file')
   .option('--output <path>', 'Output file path', { default: './a.out' })
-  .option('--debug', 'Enable debug output (tokens, AST, IR)', { default: false })
-  .option('--target <type>', 'Compilation target type: exec (executable), static-lib (static library), declare-file (declaration file), or asm (assembly file)', { default: 'exec' })
+  .option('--debug', 'Enable debug output (tokens, AST, C++)', { default: false })
+  .option('--target <type>', 'Compilation target type: exec (executable), static-lib (static library), declare-file (declaration file)', { default: 'exec' })
   .option('--platform <name>', 'Target platform (e.g., "x86_64-linux", "arm64-linux")', { default: 'x86_64-linux' })
   .action(async (filePath, options) => {
     console.log(`[DEBUG] Starting compilation for: ${filePath}`);
@@ -155,53 +155,40 @@ cli
 
       } else {
 
-        // 3. IR Generation (only for exec or static-lib)
-
-
+        // 3. C++ Generation (only for exec or static-lib)
 
         const mangleStdLib = (options.target === 'exec'); // Mangle for exec, not for static-lib
-        const irGenerator = new IRGenerator(platform, parser, mangleStdLib, inputFilePath, options.debug); 
-        const llvmIr = irGenerator.generate(statements);
+        const generator = new CppGenerator(platform, parser, mangleStdLib, inputFilePath, options.debug); 
+        const cppCode = generator.generate(statements);
         if (options.debug) {
-          console.log("\n--- LLVM IR ---");
-          console.log(llvmIr);
+          console.log("\n--- C++ Code ---");
+          console.log(cppCode);
         }
         // Create temp files for compilation steps
         const tempDir = path.join(outputDir, '.tsyuc_build_temp');
         if (!fs.existsSync(tempDir)) {
           fs.mkdirSync(tempDir, { recursive: true });
         }
-        const llPath = path.join(tempDir, `${outputFileName}.ll`);
-        const objPath = path.join(tempDir, `${outputFileName}.o`);
+        const cppPath = path.join(tempDir, `${outputFileName}.c`);
         const uvRuntimeSourcePath = path.join(projectRoot, 'runtime', 'yu_uv_runtime.c');
-        const uvRuntimeObjPath = path.join(tempDir, 'yu_uv_runtime.o');
-        fs.writeFileSync(llPath, llvmIr);
+        const runtimeHeaderPath = path.join(projectRoot, 'runtime');
+        
+        fs.writeFileSync(cppPath, cppCode);
 
-        if (options.target === 'asm') {
-          const asmPath = outputFilePath.endsWith('.s') ? outputFilePath : outputFilePath + '.s';
-          console.log(`  [CMD] llc -filetype=asm -relocation-model=pic ${llPath} -o ${asmPath}`);
-          execFileSync('llc', ['-filetype=asm', '-relocation-model=pic', llPath, '-o', asmPath], { stdio: 'inherit' });
-        } else {
-          // 4. Compile LLVM IR to object file
-          console.log(`  [CMD] llc -filetype=obj -relocation-model=pic ${llPath} -o ${objPath}`);
-          execFileSync('llc', ['-filetype=obj', '-relocation-model=pic', llPath, '-o', objPath], { stdio: 'inherit' });
-
-          if (options.target === 'exec') {
-            console.log(`  [CMD] gcc -c ${uvRuntimeSourcePath} -o ${uvRuntimeObjPath}`);
-            execFileSync('gcc', ['-c', uvRuntimeSourcePath, '-o', uvRuntimeObjPath], { stdio: 'inherit' });
-
-            // 5. Link object file into an executable using gcc
+        if (options.target === 'exec') {
             const linkerFlags = finder.getLinkerFlags(osIdentifier, archIdentifier);
             const cc = 'gcc';
-            console.log(`  [CMD] ${cc} -o ${outputFilePath} ${objPath} ${uvRuntimeObjPath} ${linkerFlags.join(' ')}`);
-            execFileSync(cc, ['-o', outputFilePath, objPath, uvRuntimeObjPath, ...linkerFlags], { stdio: 'inherit' });
-          } else if (options.target === 'static-lib') {
-            // 5. Create static library (.a)
+            // Compile both generated c and uv runtime c
+            console.log(`  [CMD] ${cc} -O2 -I${runtimeHeaderPath} -o ${outputFilePath} ${cppPath} ${uvRuntimeSourcePath} ${linkerFlags.join(' ')}`);
+            execFileSync(cc, ['-O2', `-I${runtimeHeaderPath}`, '-o', outputFilePath, cppPath, uvRuntimeSourcePath, ...linkerFlags], { stdio: 'inherit' });
+        } else if (options.target === 'static-lib') {
+            const objPath = path.join(tempDir, `${outputFileName}.o`);
+            console.log(`  [CMD] gcc -c -O2 -I${runtimeHeaderPath} ${cppPath} -o ${objPath}`);
+            execFileSync('gcc', ['-c', '-O2', `-I${runtimeHeaderPath}`, cppPath, '-o', objPath], { stdio: 'inherit' });
             console.log(`  [CMD] ar rc ${outputFilePath} ${objPath}`);
             execFileSync('ar', ['rc', outputFilePath, objPath], { stdio: 'inherit' });
-          } else {
+        } else {
             throw new Error(`Unknown target type: ${options.target}`);
-          }
         }
 
         // Clean up temp files
@@ -209,6 +196,7 @@ cli
 
         console.log(`Successfully compiled to ${outputFilePath}`);
       }
+
     } catch (error: any) {
       console.error(`Compilation failed: ${error.message}`);
       if (options.debug && error.stack) {

@@ -312,11 +312,10 @@ export class DeclarationParser {
                     cloned.name.column
                 );
                 cloned.properties = cloned.properties.map(prop => new PropertyDeclaration(
+                    prop.visibility,
                     prop.name,
                     prop.type ? this.cloneTypeAnnotation(prop.type, renamePrefix, renamedNames) : null,
-                    prop.initializer ? this.rewriteExpr(prop.initializer, renamePrefix, renamedNames) : null,
-                    prop.visibility,
-                    prop.isStatic
+                    prop.initializer ? this.rewriteExpr(prop.initializer, renamePrefix, renamedNames) : null
                 ));
                 cloned.methods = cloned.methods.map(method => new FunctionDeclaration(
                     method.name,
