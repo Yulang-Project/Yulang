@@ -17,6 +17,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
     private functions: Map<string, FunctionDeclaration | DeclareFunction> = new Map();
     private scopes: Scope[] = [];
     private expectedTypes: (TypeAnnotation | null)[] = [];
+    private currentReturnTypes: (TypeAnnotation | null)[] = [];
     private currentClass: string | null = null;
     private labelCounter = 0;
     private namespaceImports: Map<string, Map<string, string>>;
@@ -50,6 +51,15 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
         return undefined;
     }
 
+    private renderImplicitConversion(value: string, actualType: TypeAnnotation | null, expectedType: TypeAnnotation | null | undefined): string {
+        if (!(expectedType instanceof BasicTypeAnnotation) || expectedType.name.lexeme !== 'string') return value;
+        if (!(actualType instanceof BasicTypeAnnotation)) return value;
+        if (actualType.name.lexeme === 'string') return value;
+        if (actualType.name.lexeme === 'bool') return this.renderBoolToString(value);
+        if (this.isNumericType(actualType)) return this.renderNumericToString(value, actualType);
+        return value;
+    }
+
     private withExpectedType<T>(type: TypeAnnotation | null | undefined, fn: () => T): T {
         this.expectedTypes.push(type ?? null);
         try {
@@ -61,6 +71,70 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
 
     private currentExpectedType(): TypeAnnotation | null {
         return this.expectedTypes[this.expectedTypes.length - 1] ?? null;
+    }
+
+    private withReturnType<T>(type: TypeAnnotation | null | undefined, fn: () => T): T {
+        this.currentReturnTypes.push(type ?? null);
+        try {
+            return fn();
+        } finally {
+            this.currentReturnTypes.pop();
+        }
+    }
+
+    private currentReturnType(): TypeAnnotation | null {
+        return this.currentReturnTypes[this.currentReturnTypes.length - 1] ?? null;
+    }
+
+    private isNumericType(type: TypeAnnotation | null): boolean {
+        return type instanceof BasicTypeAnnotation && ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64'].includes(type.name.lexeme);
+    }
+
+    private renderNumericToString(value: string, type: TypeAnnotation | null): string {
+        if (!(type instanceof BasicTypeAnnotation)) return value;
+        switch (type.name.lexeme) {
+            case 'i8':
+            case 'i16':
+            case 'i32':
+                return `yu_string_from_int64((int64_t)${value})`;
+            case 'i64':
+                return `yu_string_from_int64(${value})`;
+            case 'u8':
+            case 'u16':
+            case 'u32':
+                return `yu_string_from_uint64((uint64_t)${value})`;
+            case 'u64':
+                return `yu_string_from_uint64(${value})`;
+            case 'f32':
+            case 'f64':
+                return `yu_string_from_double((double)${value})`;
+            default:
+                return value;
+        }
+    }
+
+    private renderBoolToString(value: string): string {
+        return `yu_string{(char*)(${value} ? "true" : "false"), ${value} ? 4 : 5}`;
+    }
+
+    private renderPromiseStore(value: string, type: TypeAnnotation | null): string {
+        if (type instanceof BasicTypeAnnotation) {
+            if (type.name.lexeme === 'string') return `yu_promise_store_string(${value})`;
+            if (type.name.lexeme === 'bool') return `yu_promise_store_bool(${value})`;
+            if (type.name.lexeme === 'i32') return `yu_promise_store_i32(${value})`;
+            if (type.name.lexeme === 'i64') return `yu_promise_store_i64(${value})`;
+        }
+        return `(void*)${value}`;
+    }
+
+    private renderPromiseLoad(value: string, type: TypeAnnotation | null): string {
+        if (type instanceof BasicTypeAnnotation) {
+            if (type.name.lexeme === 'string') return `yu_promise_load_string(${value})`;
+            if (type.name.lexeme === 'bool') return `yu_promise_load_bool(${value})`;
+            if (type.name.lexeme === 'i32') return `yu_promise_load_i32(${value})`;
+            if (type.name.lexeme === 'i64') return `yu_promise_load_i64(${value})`;
+        }
+        return `(${this.getCppType(type)})${value}`;
     }
 
     private token(name: string): Token {
@@ -174,6 +248,9 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
         code += '#include <stdbool.h>\n';
         code += '#include <stdio.h>\n';
         code += '#include <string.h>\n';
+        code += '#include <stdlib.h>\n';
+        code += '#include <time.h>\n';
+        code += '#include <math.h>\n';
         code += '#include <functional>\n';
         code += '#include <utility>\n\n';
         code += this.runtimeCallbackHelpers();
@@ -569,7 +646,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
             const name = expr.callee.name.lexeme;
 
             if (objExpr instanceof IdentifierExpr && objExpr.name.lexeme === 'clib') {
-                return `${name}(${expr.args.map(arg => this.renderClibArg(arg)).join(', ')})`;
+                return this.renderClibCall(name, expr.args);
             }
 
             if (objExpr instanceof IdentifierExpr && objExpr.name.lexeme === 'uv') {
@@ -579,7 +656,10 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
             const mapped = this.resolveNamespaceMember(expr.callee);
             if (mapped) {
                 const paramTypes = this.getCallableParameterTypes(expr.callee);
-                const args = expr.args.map((arg, i) => this.withExpectedType(paramTypes[i], () => arg.accept(this))).join(', ');
+                const args = expr.args.map((arg, i) => {
+                    const rendered = this.withExpectedType(paramTypes[i], () => arg.accept(this));
+                    return this.renderImplicitConversion(rendered, this.expressionType(arg), paramTypes[i]);
+                }).join(', ');
                 return `${this.mangleName(mapped)}(${args})`;
             }
 
@@ -595,19 +675,28 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
                 const classDecl = this.classes.get(objectType.name.lexeme);
                 const method = classDecl?.methods.find(m => m.name.lexeme === name);
                 if (method) {
-                    const args = expr.args.map((arg, i) => this.withExpectedType(method.parameters[i]?.type, () => arg.accept(this)));
+                    const args = expr.args.map((arg, i) => {
+                        const rendered = this.withExpectedType(method.parameters[i]?.type, () => arg.accept(this));
+                        return this.renderImplicitConversion(rendered, this.expressionType(arg), method.parameters[i]?.type);
+                    });
                     return `yu_class_${objectType.name.lexeme}_${name}(${[obj, ...args].join(', ')})`;
                 }
             }
 
             const paramTypes = this.getCallableParameterTypes(expr.callee);
-            const args = expr.args.map((arg, i) => this.withExpectedType(paramTypes[i], () => arg.accept(this))).join(', ');
+            const args = expr.args.map((arg, i) => {
+                const rendered = this.withExpectedType(paramTypes[i], () => arg.accept(this));
+                return this.renderImplicitConversion(rendered, this.expressionType(arg), paramTypes[i]);
+            }).join(', ');
             return `${expr.callee.accept(this)}(${args})`;
         }
 
         const paramTypes = this.getCallableParameterTypes(expr.callee);
         const callee = expr.callee.accept(this);
-        const args = expr.args.map((arg, i) => this.withExpectedType(paramTypes[i], () => arg.accept(this))).join(', ');
+        const args = expr.args.map((arg, i) => {
+            const rendered = this.withExpectedType(paramTypes[i], () => arg.accept(this));
+            return this.renderImplicitConversion(rendered, this.expressionType(arg), paramTypes[i]);
+        }).join(', ');
         return `${callee}(${args})`;
     }
 
@@ -621,6 +710,24 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
             return `${value}.ptr`;
         }
         return value;
+    }
+
+    private renderClibCall(name: string, args: Expr[]): string {
+        switch (name) {
+            case 'readFile': {
+                const path = this.withExpectedType(this.basic('string'), () => args[0]!.accept(this));
+                const callback = this.withExpectedType(this.getUvParameterTypes('readFile')[1], () => args[1]!.accept(this));
+                return `yu_fs_readFile(${path}, (void*)(&yu_cb_err_string_thunk), yu_cb_err_string_env(${callback}))`;
+            }
+            case 'writefile':
+            case 'writeFile': {
+                const path = this.withExpectedType(this.basic('string'), () => args[0]!.accept(this));
+                const data = this.withExpectedType(this.basic('string'), () => args[1]!.accept(this));
+                return `yu_uv_writeFileSync(${path}, ${data})`;
+            }
+            default:
+                return `${name}(${args.map(arg => this.renderClibArg(arg)).join(', ')})`;
+        }
     }
 
     private renderUvCall(name: string, args: Expr[]): string {
@@ -708,6 +815,15 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
     }
 
     visitAsExpr(expr: AsExpr): string {
+        const sourceType = this.expressionType(expr.expression);
+        if (expr.type instanceof BasicTypeAnnotation && expr.type.name.lexeme === 'string') {
+            const value = expr.expression.accept(this);
+            if (sourceType instanceof BasicTypeAnnotation) {
+                if (sourceType.name.lexeme === 'string') return value;
+                if (sourceType.name.lexeme === 'bool') return this.renderBoolToString(value);
+                if (this.isNumericType(sourceType)) return this.renderNumericToString(value, sourceType);
+            }
+        }
         return `(${this.getCppType(expr.type)})(${expr.expression.accept(this)})`;
     }
 
@@ -718,7 +834,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
         if (resultType instanceof BasicTypeAnnotation && resultType.name.lexeme === 'void') {
             return `([&]() -> void { yu_promise* ${promiseVar} = ${inner}; while (!${promiseVar}->resolved) yu_uv_run(); })()`;
         }
-        return `([&]() -> ${this.getCppType(resultType)} { yu_promise* ${promiseVar} = ${inner}; while (!${promiseVar}->resolved) yu_uv_run(); return (${this.getCppType(resultType)})${promiseVar}->value; })()`;
+        return `([&]() -> ${this.getCppType(resultType)} { yu_promise* ${promiseVar} = ${inner}; while (!${promiseVar}->resolved) yu_uv_run(); return ${this.renderPromiseLoad(`${promiseVar}->value`, resultType)}; })()`;
     }
 
     visitObjectLiteralExpr(expr: ObjectLiteralExpr): string {
@@ -748,8 +864,22 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
 
     private renderPromiseNew(expr: NewExpr): string {
         const promiseVar = `yu_promise_${this.labelCounter++}`;
-        const executor = expr.args[0] ? expr.args[0]!.accept(this) : 'nullptr';
-        return `([&]() -> yu_promise* { auto* ${promiseVar} = (yu_promise*)GC_malloc(sizeof(yu_promise)); ${promiseVar}->value = nullptr; ${promiseVar}->resolved = 0; auto resolve = [${promiseVar}](auto value) -> void { ${promiseVar}->value = (void*)value; ${promiseVar}->resolved = 1; }; auto reject = [${promiseVar}](int32_t err) -> void { ${promiseVar}->value = (void*)(intptr_t)err; ${promiseVar}->resolved = 1; }; ${executor}(resolve, reject); return ${promiseVar}; })()`;
+        const executorExpr = expr.args[0] ?? null;
+        const promiseType = this.currentExpectedType();
+        const valueType = promiseType instanceof PromiseTypeAnnotation ? promiseType.valueType : this.basic('object');
+        const resolveType = valueType instanceof BasicTypeAnnotation && valueType.name.lexeme === 'void'
+            ? new FunctionTypeAnnotation([], this.voidType())
+            : new FunctionTypeAnnotation([valueType], this.voidType());
+        const executor = executorExpr
+            ? this.withExpectedType(new FunctionTypeAnnotation([
+                resolveType,
+                new FunctionTypeAnnotation([this.basic('i32')], this.voidType())
+            ], this.voidType()), () => executorExpr.accept(this))
+            : 'nullptr';
+        const resolve = valueType instanceof BasicTypeAnnotation && valueType.name.lexeme === 'void'
+            ? `auto resolve = [${promiseVar}]() -> void { ${promiseVar}->value = nullptr; ${promiseVar}->resolved = 1; };`
+            : `auto resolve = [${promiseVar}](auto value) -> void { ${promiseVar}->value = ${this.renderPromiseStore('value', valueType)}; ${promiseVar}->resolved = 1; };`;
+        return `([&]() -> yu_promise* { auto* ${promiseVar} = (yu_promise*)GC_malloc(sizeof(yu_promise)); ${promiseVar}->value = nullptr; ${promiseVar}->resolved = 0; ${resolve} auto reject = [${promiseVar}](int32_t err) -> void { ${promiseVar}->value = (void*)(intptr_t)err; ${promiseVar}->resolved = 1; }; ${executor}(resolve, reject); return ${promiseVar}; })()`;
     }
 
     visitDeleteExpr(expr: DeleteExpr): string {
@@ -838,7 +968,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
     }
 
     visitReturnStmt(stmt: ReturnStmt): string {
-        return `${this.indent()}return${stmt.value ? ` ${this.withExpectedType(null, () => stmt.value!.accept(this))}` : ''};\n`;
+        return `${this.indent()}return${stmt.value ? ` ${this.withExpectedType(this.currentReturnType(), () => stmt.value!.accept(this))}` : ''};\n`;
     }
 
     visitFunctionDeclaration(decl: FunctionDeclaration): string {
@@ -846,7 +976,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
         this.pushScope();
         for (const p of decl.parameters) this.define(p.name.lexeme, p.type);
         let code = `${this.getCppType(decl.returnType ?? this.voidType())} ${name}(${this.renderParameters(decl.parameters)}) `;
-        code += decl.body.accept(this);
+        code += this.withReturnType(decl.returnType ?? this.voidType(), () => decl.body.accept(this));
         this.popScope();
         return code;
     }
@@ -861,7 +991,7 @@ export class CppGenerator implements ExprVisitor<string>, StmtVisitor<string> {
             this.define('self', this.basic(decl.name.lexeme));
             for (const p of m.parameters) this.define(p.name.lexeme, p.type);
             code += `${this.getCppType(m.returnType ?? this.voidType())} yu_class_${decl.name.lexeme}_${m.name.lexeme}(${params.join(', ')}) `;
-            code += m.body.accept(this);
+            code += this.withReturnType(m.returnType ?? this.voidType(), () => m.body.accept(this));
             this.popScope();
         }
         this.currentClass = previousClass;

@@ -80,6 +80,74 @@ extern void *GC_malloc(size_t size);
 
 static char yu_empty_string[] = "";
 
+static yu_string yu_gc_string_from_cstr(const char *data) {
+    if (!data) {
+        yu_string result = { yu_empty_string, 0 };
+        return result;
+    }
+    size_t length = strlen(data);
+    char *gc_data = (char *)GC_malloc(length + 1);
+    memcpy(gc_data, data, length + 1);
+    yu_string result;
+    result.ptr = gc_data;
+    result.length = (int64_t)length;
+    return result;
+}
+
+yu_string yu_string_from_int64(int64_t value) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
+    return yu_gc_string_from_cstr(buffer);
+}
+
+yu_string yu_string_from_uint64(uint64_t value) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)value);
+    return yu_gc_string_from_cstr(buffer);
+}
+
+yu_string yu_string_from_double(double value) {
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%.17g", value);
+    return yu_gc_string_from_cstr(buffer);
+}
+
+void *yu_promise_store_string(yu_string value) {
+    yu_string *boxed = (yu_string *)GC_malloc(sizeof(yu_string));
+    *boxed = value;
+    return boxed;
+}
+
+yu_string yu_promise_load_string(void *value) {
+    return value ? *(yu_string *)value : (yu_string){ yu_empty_string, 0 };
+}
+
+void *yu_promise_store_i32(int32_t value) {
+    return (void *)(intptr_t)value;
+}
+
+int32_t yu_promise_load_i32(void *value) {
+    return (int32_t)(intptr_t)value;
+}
+
+void *yu_promise_store_i64(int64_t value) {
+    int64_t *boxed = (int64_t *)GC_malloc(sizeof(int64_t));
+    *boxed = value;
+    return boxed;
+}
+
+int64_t yu_promise_load_i64(void *value) {
+    return value ? *(int64_t *)value : 0;
+}
+
+void *yu_promise_store_bool(int32_t value) {
+    return (void *)(intptr_t)value;
+}
+
+int32_t yu_promise_load_bool(void *value) {
+    return (int32_t)(intptr_t)value;
+}
+
 void yu_uv_init(void) {
     uv_default_loop();
 }

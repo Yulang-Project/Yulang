@@ -34,6 +34,18 @@ typedef struct {
     int32_t resolved;
 } yu_promise;
 
+yu_string yu_string_from_int64(int64_t value);
+yu_string yu_string_from_uint64(uint64_t value);
+yu_string yu_string_from_double(double value);
+void *yu_promise_store_string(yu_string value);
+yu_string yu_promise_load_string(void *value);
+void *yu_promise_store_i32(int32_t value);
+int32_t yu_promise_load_i32(void *value);
+void *yu_promise_store_i64(int64_t value);
+int64_t yu_promise_load_i64(void *value);
+void *yu_promise_store_bool(int32_t value);
+int32_t yu_promise_load_bool(void *value);
+
 // Runtime functions
 int32_t yu_fs_readFile(yu_string path, void *code, void *env);
 yu_string yu_uv_readFileSync(yu_string path);
